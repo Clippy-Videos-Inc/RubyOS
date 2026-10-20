@@ -344,7 +344,7 @@ static int cmd_cp(int argc, char **argv)
     int err;
 
     if (argc == 4 && (k_streq(argv[1], "-r") || k_streq(argv[1], "-R"))) {
-        kprintf("cp: -r nao esta implementado na 0.2 (so copia arquivos)\n");
+        kprintf("cp: -r nao esta implementado (so copia arquivos)\n");
         return 1;
     }
     if (argc != 3) {

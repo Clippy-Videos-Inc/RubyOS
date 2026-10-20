@@ -26,6 +26,8 @@ struct fs_node;
 #define PROC_NAME_MAX       15
 #define PROC_STACK_SIZE     (16u * 1024u)
 #define PROC_HEAP_LIMIT     (1024u * 1024u)    /* cota de heap por tarefa */
+#define PROC_RUBY_STACK     (256u * 1024u)     /* pilha de um processo Ruby */
+#define PROC_RUBY_HEAP      (6u * 1024u * 1024u) /* cota de um processo Ruby */
 
 #define PROC_FLAG_ESSENTIAL 1u                 /* nao pode ser encerrada com kill */
 
@@ -65,8 +67,14 @@ struct process {
 void process_init(struct fs_node *root);
 
 /* Cria uma tarefa READY que executara entry(arg). Retorna o PID (> 0) ou um erro PROC_E*.
- * A tarefa herda o diretorio atual de quem a criou. */
+ * A tarefa herda o diretorio atual de quem a criou. Usa a pilha e a cota padrao. */
 int process_create(const char *name, void (*entry)(void *), void *arg, uint32_t flags);
+
+/* Igual a process_create, com pilha (stack_size, minimo 4 KiB, 0 = padrao) e cota de
+ * heap (heap_limit em bytes, a pilha conta na cota; 0 = padrao) escolhidas. O runtime
+ * Ruby precisa de pilha e cota maiores que as tarefas simples em C. */
+int process_create_ex(const char *name, void (*entry)(void *), void *arg, uint32_t flags,
+                      size_t stack_size, size_t heap_limit);
 
 /* Encerra o processo atual. Nunca retorna. */
 void process_exit(void) __attribute__((noreturn));
@@ -81,6 +89,9 @@ void process_yield(void);
 void process_sleep(uint32_t ticks);
 
 struct process *process_current(void);
+
+/* true se existe um processo com esse PID que ainda nao terminou. */
+bool process_alive(int pid);
 
 /* Acesso a tabela: retorna o processo do indice i (0..PROC_MAX-1) ou NULL se vazio. */
 const struct process *process_at(int index);

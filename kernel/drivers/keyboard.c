@@ -1,7 +1,7 @@
 /* kernel/drivers/keyboard.c - teclado PS/2 via IRQ 1.
  *
  * Suporta letras, numeros, pontuacao US, Shift, Caps Lock, Enter, Backspace,
- * Tab e Espaco. Teclas estendidas (setas, Del, Home...) sao ignoradas na 0.1. */
+ * Tab, Espaco, Esc e Ctrl+letra. Teclas estendidas (setas, Del, Home...) sao ignoradas na 0.1. */
 #include "drivers/keyboard.h"
 #include "interrupts.h"
 #include "io.h"
@@ -29,6 +29,7 @@ static volatile uint8_t tail;    /* escrito so por keyboard_poll */
 static bool shift;
 static bool caps;
 static bool extended;
+static bool ctrl;
 
 static char pick(const char *normal, const char *shifted, uint8_t index)
 {
@@ -48,6 +49,7 @@ static char translate(uint8_t code)
     if (code >= 0x2B && code <= 0x35) return pick(row_z,   row_z_s,   (uint8_t)(code - 0x2B));
 
     switch (code) {
+    case 0x01: return 0x1B;          /* Esc */
     case 0x0E: return '\b';
     case 0x0F: return '\t';
     case 0x1C: return '\n';
@@ -90,6 +92,9 @@ static void keyboard_irq(struct regs *r)
     case 0x36:                     /* Shift direito */
         shift = !release;
         return;
+    case 0x1D:                     /* Ctrl esquerdo */
+        ctrl = !release;
+        return;
     case 0x3A:                     /* Caps Lock alterna ao pressionar */
         if (!release)
             caps = !caps;
@@ -101,6 +106,8 @@ static void keyboard_irq(struct regs *r)
     if (release)
         return;
     c = translate(code);
+    if (ctrl && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
+        c = (char)(c & 0x1F);      /* Ctrl+letra: 1..26 (Ctrl+C = 3, Ctrl+D = 4) */
     if (c != 0)
         push(c);
 }

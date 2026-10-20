@@ -124,6 +124,12 @@ void process_init(struct fs_node *root)
 
 int process_create(const char *name, void (*entry)(void *), void *arg, uint32_t flags)
 {
+    return process_create_ex(name, entry, arg, flags, 0, 0);
+}
+
+int process_create_ex(const char *name, void (*entry)(void *), void *arg, uint32_t flags,
+                      size_t stack_size, size_t heap_limit)
+{
     uint32_t saved = cpu_save_flags_cli();
     struct process *p = NULL;
     uint8_t *stack;
@@ -131,6 +137,14 @@ int process_create(const char *name, void (*entry)(void *), void *arg, uint32_t 
     uintptr_t top;
     size_t i;
     int pid;
+
+    if (stack_size == 0)
+        stack_size = PROC_STACK_SIZE;
+    if (stack_size < 4096u)
+        stack_size = 4096u;
+    stack_size &= ~(size_t)15u;
+    if (heap_limit == 0)
+        heap_limit = PROC_HEAP_LIMIT;
 
     for (i = 0; i < PROC_MAX; i++) {
         if (table[i].state == PROC_UNUSED) {
@@ -143,7 +157,7 @@ int process_create(const char *name, void (*entry)(void *), void *arg, uint32_t 
         return PROC_ENOSLOT;
     }
 
-    stack = kmalloc_owner(PROC_STACK_SIZE, owner_of(p));
+    stack = kmalloc_owner(stack_size, owner_of(p));
     if (stack == NULL) {
         cpu_restore_flags(saved);
         return PROC_ENOMEM;
@@ -159,16 +173,16 @@ int process_create(const char *name, void (*entry)(void *), void *arg, uint32_t 
     p->name[i] = '\0';
     p->essential = (flags & PROC_FLAG_ESSENTIAL) != 0;
     p->stack = stack;
-    p->stack_size = PROC_STACK_SIZE;
+    p->stack_size = stack_size;
     p->entry = entry;
     p->arg = arg;
     p->start_tick = timer_ticks();
     p->cwd = current->cwd;
-    heap_set_owner_limit(owner_of(p), PROC_HEAP_LIMIT);
+    heap_set_owner_limit(owner_of(p), heap_limit);
 
     /* Quadro inicial que context_switch vai "restaurar": edi esi ebx ebp, o endereco
      * de retorno (task_start) e um endereco de retorno falso para o ABI. */
-    top = ((uintptr_t)stack + PROC_STACK_SIZE) & ~(uintptr_t)15u;
+    top = ((uintptr_t)stack + stack_size) & ~(uintptr_t)15u;
     sp = (uint32_t *)(void *)(top - 6u * sizeof(uint32_t));
     sp[0] = 0;                                     /* edi */
     sp[1] = 0;                                     /* esi */
@@ -245,6 +259,17 @@ void process_sleep(uint32_t ticks)
 struct process *process_current(void)
 {
     return current;
+}
+
+bool process_alive(int pid)
+{
+    int i;
+
+    for (i = 0; i < PROC_MAX; i++) {
+        if (table[i].state != PROC_UNUSED && table[i].state != PROC_ZOMBIE && table[i].pid == pid)
+            return true;
+    }
+    return false;
 }
 
 const struct process *process_at(int index)

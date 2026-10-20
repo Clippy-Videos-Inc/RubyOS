@@ -12,8 +12,8 @@
 #include "heap.h"
 #include "process.h"
 #include "ramfs.h"
-#include "drivers/keyboard.h"
-#include "drivers/serial.h"
+#include "ruby/rb_runtime.h"
+#include "console.h"
 
 #define LINE_MAX         128
 #define ARGV_MAX         16
@@ -29,19 +29,11 @@ static const struct command_group *const groups[] = {
 
 /* ---------------------------------------------------------------- entrada */
 
-/* Espera um caractere do teclado PS/2 ou da serial. Enquanto nao ha nada, cede a CPU
+/* Espera um caractere do console (teclado PS/2 ou serial); enquanto nao ha nada, cede a CPU
  * (o init dorme em hlt ate a proxima interrupcao). */
 static int getch(void)
 {
-    for (;;) {
-        int c = keyboard_poll();
-        if (c >= 0)
-            return c;
-        c = serial_poll();
-        if (c >= 0)
-            return c;
-        process_yield();
-    }
+    return console_getc();
 }
 
 static int read_line(char *buf, int max)
@@ -51,6 +43,11 @@ static int read_line(char *buf, int max)
     for (;;) {
         int c = getch();
 
+        if (c == CONSOLE_CTRL_C) {              /* cancela a linha */
+            kprintf("^C\n");
+            buf[0] = '\0';
+            return 0;
+        }
         if (c == '\r' || c == '\n') {
             terminal_putc('\n');
             buf[len] = '\0';
@@ -183,6 +180,7 @@ static int run_redirected(const struct command *cmd, int argc, char **argv,
 
 /* ---------------------------------------------------------------- laco */
 
+static void shell_loop(void) __attribute__((noreturn));
 static void shell_loop(void)
 {
     char line[LINE_MAX];
@@ -213,7 +211,13 @@ static void shell_loop(void)
 
         cmd = find_command(argv[0]);
         if (cmd == NULL) {
-            kprintf("Comando desconhecido: %s (digite 'help')\n", argv[0]);
+            /* Nao e comando interno: tenta um programa Ruby (/apps/NOME.rb). */
+            int rc = redirect ? RB_ENOTFOUND
+                              : ruby_run_foreground(argv[0], argc - 1, (const char *const *)&argv[1]);
+            if (rc == RB_ENOTFOUND)
+                kprintf("Comando desconhecido: %s (digite 'help')\n", argv[0]);
+            else if (rc < 0)
+                kprintf("%s: nao foi possivel iniciar o programa (erro %d)\n", argv[0], rc);
             continue;
         }
         if (redirect)
@@ -223,14 +227,19 @@ static void shell_loop(void)
     }
 }
 
-static void shell_task(void *arg)
+void shell_run(void)
 {
     struct fs_node *home;
 
-    (void)arg;
     if (fs_lookup(NULL, "/home/user", &home) == FS_OK)
         process_current()->cwd = home;
     shell_loop();
+}
+
+static void shell_task(void *arg)
+{
+    (void)arg;
+    shell_run();
 }
 
 void shell_start(void)

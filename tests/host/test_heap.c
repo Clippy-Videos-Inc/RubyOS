@@ -328,6 +328,78 @@ static void test_stress_random(void)
     CHECK(heap_check());
 }
 
+static void test_realloc(void)
+{
+    struct heap_stats st;
+    uint8_t *p;
+    uint8_t *q;
+    uint8_t *keep;
+    size_t i;
+
+    fresh();
+
+    /* krealloc(NULL, n) = kmalloc(n); krealloc(p, 0) libera. */
+    p = krealloc(NULL, 100);
+    CHECK(p != NULL);
+    for (i = 0; i < 100; i++)
+        p[i] = (uint8_t)i;
+    CHECK(krealloc(p, 0) == NULL);
+    heap_get_stats(&st);
+    CHECK(st.used == 0);
+
+    /* crescer preserva o conteudo; encolher devolve o mesmo ponteiro */
+    p = kmalloc(64);
+    for (i = 0; i < 64; i++)
+        p[i] = (uint8_t)(i + 7);
+    keep = kmalloc(64);                            /* impede crescer no lugar */
+    CHECK(keep != NULL);
+    q = krealloc(p, 4096);
+    CHECK(q != NULL);
+    for (i = 0; i < 64; i++)
+        CHECK(q[i] == (uint8_t)(i + 7));
+    CHECK(krealloc(q, 32) == q);
+    CHECK(heap_check());
+    kfree(q);
+    kfree(keep);
+    heap_get_stats(&st);
+    CHECK(st.used == 0 && st.free_blocks == 1);
+
+    /* o dono do bloco e preservado, mesmo se quem chama e outro dono */
+    heap_set_owner(3);
+    p = kmalloc(128);
+    heap_set_owner(0);
+    CHECK(heap_owner_bytes(3) == 128);
+    q = krealloc(p, 1024);
+    CHECK(q != NULL);
+    CHECK(heap_owner_bytes(3) == 1024 && heap_owner_bytes(0) == 0);
+    kfree(q);
+    CHECK(heap_owner_bytes(3) == 0);
+
+    /* cota estourada: retorna NULL e o bloco antigo continua valido */
+    heap_set_owner_limit(2, 512);
+    heap_set_owner(2);
+    p = kmalloc(256);
+    heap_set_owner(0);
+    CHECK(p != NULL);
+    memset(p, 0x5A, 256);
+    CHECK(krealloc(p, 2048) == NULL);
+    CHECK(p[0] == 0x5A && p[255] == 0x5A && heap_owner_bytes(2) == 256);
+    kfree(p);
+    heap_set_owner_limit(2, 0);
+
+    /* falta de memoria: idem */
+    p = kmalloc(1024);
+    CHECK(krealloc(p, ARENA_SIZE * 2) == NULL);
+    CHECK(heap_owner_bytes(0) == 1024);
+    kfree(p);
+
+    /* ponteiro invalido / ja liberado */
+    p = kmalloc(32);
+    kfree(p);
+    EXPECT_PANIC(krealloc(p, 64), "krealloc");
+    CHECK(heap_check());
+}
+
 int main(void)
 {
     test_basic();
@@ -339,6 +411,7 @@ int main(void)
     test_owners_and_quota();
     test_fault_detection();
     test_stress_random();
+    test_realloc();
 
     if (failures == 0)
         printf("heap: %d verificacoes OK\n", checks);

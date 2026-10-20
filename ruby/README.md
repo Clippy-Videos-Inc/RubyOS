@@ -1,11 +1,15 @@
 # ruby/ - camada de usuario em Ruby
 
-**Vazio na versao 0.1.** Ainda nao existe runtime Ruby no RubyOS (ele chega na 0.3);
-por isso a shell da 0.1 esta em `kernel/shell.c`.
+Tudo aqui e Ruby (mruby 3.3) executado **dentro** do RubyOS. `tools/embed.rb` embute estes arquivos na imagem
+e o kernel os copia para o ramfs a cada boot:
 
-Layout planejado (nao implementado):
+| Pasta | Vira | Conteudo |
+|---|---|---|
+| `system/` | `/system` | `prelude.rb` (carregado em todo programa: `puts`, `gets`, `require`, `rand`...), `rubyshell.rb` (a shell) |
+| `apps/` | `/apps` | programas chamados pelo nome: `calc`, `about`, `files`, `edit`, `irb`, `selftest` |
+| `lib/` | `/lib` | bibliotecas para `require "nome"` (exemplo: `textutil.rb`) |
+| `home/user/` | `/home/user` | exemplos: `hello.rb`, `fib.rb`, `uselib.rb`, `erro.rb`, `loop.rb`, `memhog.rb` |
+| `runtime/` | (nao embutido) | `mruby_build_config.rb`: como o mruby e compilado para o kernel |
 
-- `runtime/` - integracao do interpretador Ruby reduzido com o kernel
-- `shell/`   - RubyShell reescrita em Ruby
-- `system/`  - servicos do sistema (arquivos, processos, configuracoes)
-- `apps/`    - aplicativos (calculadora, gerenciador de arquivos, editor)
+A ponte com o kernel (`RubyOS::Console/FS/Proc/Sys`) esta em `kernel/ruby/rb_bindings.c`; veja o README
+principal ("Como criar aplicativos Ruby") para a API e as limitacoes.

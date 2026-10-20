@@ -16,8 +16,13 @@ module RubyOSImage
     set timeout=1
     set default=0
 
-    menuentry "RubyOS 0.2" {
+    menuentry "RubyOS 0.3" {
         multiboot /boot/kernel.elf
+        boot
+    }
+
+    menuentry "RubyOS 0.3 (shell C de emergencia)" {
+        multiboot /boot/kernel.elf shell=c
         boot
     }
   CFG

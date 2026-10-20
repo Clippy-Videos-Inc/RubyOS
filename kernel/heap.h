@@ -52,6 +52,11 @@ void *kcalloc(size_t count, size_t size);
  * double free causam kernel_panic(). */
 void kfree(void *ptr);
 
+/* Redimensiona um bloco mantendo o dono original. krealloc(NULL, n) = kmalloc(n);
+ * krealloc(p, 0) libera p e retorna NULL. Se nao houver memoria (ou a cota estourar)
+ * retorna NULL e o bloco antigo continua valido, como em realloc(). */
+void *krealloc(void *ptr, size_t size);
+
 /* Bytes de carga util hoje alocados por um dono. */
 size_t heap_owner_bytes(uint32_t owner);
 

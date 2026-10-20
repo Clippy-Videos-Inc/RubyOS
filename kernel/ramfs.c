@@ -563,7 +563,7 @@ static const char *const seed_dirs[] = {
 
 static const struct seed_file seed_files[] = {
     { "/etc/hostname", "rubyos\n" },
-    { "/etc/motd",     "Bem-vindo ao RubyOS 0.2\n" },
+    { "/etc/motd",     "Bem-vindo ao RubyOS 0.3\n" },
     { "/home/user/leia-me.txt",
       "Este e o seu diretorio pessoal.\n"
       "O sistema de arquivos fica na RAM: tudo some ao reiniciar.\n"

@@ -6,9 +6,9 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define RUBYOS_VERSION  "0.2"
-#define KERNEL_VERSION  "0.2"
-#define RUNTIME_VERSION "nenhum (planejado para a 0.3)"
+#define RUBYOS_VERSION  "0.3"
+#define KERNEL_VERSION  "0.3"
+#define RUNTIME_VERSION "mruby 3.3.0 (Ruby, somente inteiros)"
 #define RUBYOS_ARCH     "i686 (x86 32 bits, modo protegido)"
 
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002u

@@ -195,6 +195,36 @@ void kfree(void *ptr)
     (void)release_block(b);
 }
 
+void *krealloc(void *ptr, size_t size)
+{
+    struct block *b;
+    uint8_t *p = (uint8_t *)ptr;
+    void *np;
+
+    if (ptr == NULL)
+        return kmalloc(size);
+    if (size == 0) {
+        kfree(ptr);
+        return NULL;
+    }
+    if (p < heap_base + HDR_SIZE || p >= heap_end ||
+        (((uintptr_t)(p - heap_base)) & (HEAP_ALIGN - 1u)) != 0)
+        kernel_panic("krealloc: ponteiro fora do heap ou desalinhado");
+    b = (struct block *)(void *)(p - HDR_SIZE);
+    if (b->magic != MAGIC_ALLOC)
+        kernel_panic("krealloc: ponteiro invalido ou ja liberado");
+
+    if (align_up(size) <= b->size)
+        return ptr;                                    /* cabe no bloco atual */
+
+    np = kmalloc_owner(size, b->owner);
+    if (np == NULL)
+        return NULL;
+    memcpy(np, ptr, b->size);
+    kfree(ptr);
+    return np;
+}
+
 size_t heap_owner_bytes(uint32_t owner)
 {
     return owner < HEAP_MAX_OWNERS ? owner_bytes[owner] : 0;

@@ -7,6 +7,7 @@
 #include "util.h"
 #include "heap.h"
 #include "process.h"
+#include "ruby/rb_runtime.h"
 #include "drivers/timer.h"
 
 #define WORKER_DEFAULT_SECONDS 30u
@@ -93,32 +94,46 @@ static void task_hog(void *arg)
     kprintf("[hog] limite de memoria atingido apos %u KB (processo %d)\n", total, self->pid);
 }
 
+/* Cria uma tarefa de demonstracao. Retorna o PID, PROC_ENOSLOT/PROC_ENOMEM, ou
+ * PROC_DEMO_UNKNOWN se o nome nao existir. Usado pelas shells C e Ruby. */
+int proc_spawn_demo(const char *name, uint32_t seconds)
+{
+    void (*entry)(void *);
+
+    if (k_streq(name, "hello"))
+        entry = task_hello;
+    else if (k_streq(name, "worker"))
+        entry = task_worker;
+    else if (k_streq(name, "hog"))
+        entry = task_hog;
+    else
+        return PROC_DEMO_UNKNOWN;
+    return process_create(name, entry, (void *)(uintptr_t)seconds, 0);
+}
+
 static int cmd_spawn(int argc, char **argv)
 {
-    void (*entry)(void *) = NULL;
     uint32_t seconds = WORKER_DEFAULT_SECONDS;
     int pid;
 
     if (argc < 2 || argc > 3) {
-        kprintf("Uso: spawn <hello|worker|hog> [segundos]\n");
+        kprintf("Uso: spawn <hello|worker|hog|programa.rb> [segundos]\n");
         return 1;
     }
-    if (k_streq(argv[1], "hello")) {
-        entry = task_hello;
-    } else if (k_streq(argv[1], "worker")) {
-        entry = task_worker;
-        if (argc == 3 && (!k_parse_uint(argv[2], &seconds) || seconds == 0 || seconds > WORKER_MAX_SECONDS)) {
-            kprintf("spawn: segundos deve ser de 1 a %u\n", WORKER_MAX_SECONDS);
-            return 1;
-        }
-    } else if (k_streq(argv[1], "hog")) {
-        entry = task_hog;
-    } else {
-        kprintf("spawn: programa desconhecido: %s (use hello, worker ou hog)\n", argv[1]);
+    if (k_streq(argv[1], "worker") && argc == 3 &&
+        (!k_parse_uint(argv[2], &seconds) || seconds == 0 || seconds > WORKER_MAX_SECONDS)) {
+        kprintf("spawn: segundos deve ser de 1 a %u\n", WORKER_MAX_SECONDS);
         return 1;
     }
 
-    pid = process_create(argv[1], entry, (void *)(uintptr_t)seconds, 0);
+    pid = proc_spawn_demo(argv[1], seconds);
+    if (pid == PROC_DEMO_UNKNOWN) {
+        pid = ruby_spawn_program(argv[1], argc - 2, (const char *const *)&argv[2]);
+        if (pid == RB_ENOTFOUND) {
+            kprintf("spawn: programa desconhecido: %s (use hello, worker, hog ou um programa Ruby)\n", argv[1]);
+            return 1;
+        }
+    }
     if (pid == PROC_ENOSLOT) {
         kprintf("spawn: tabela de processos cheia (%d)\n", PROC_MAX);
         return 1;
@@ -156,10 +171,33 @@ static int cmd_kill(int argc, char **argv)
     return 0;
 }
 
+/* ------------------------------------------------------------------- run */
+
+static int cmd_run(int argc, char **argv)
+{
+    int rc;
+
+    if (argc < 2) {
+        kprintf("Uso: run <programa.rb> [argumentos...]\n");
+        return 1;
+    }
+    rc = ruby_run_foreground(argv[1], argc - 2, (const char *const *)&argv[2]);
+    if (rc == RB_ENOTFOUND) {
+        kprintf("run: %s: programa Ruby nao encontrado\n", argv[1]);
+        return 1;
+    }
+    if (rc < 0) {
+        kprintf("run: nao foi possivel iniciar o programa (erro %d)\n", rc);
+        return 1;
+    }
+    return rc;
+}
+
 static const struct command commands[] = {
     { "ps",        "ps",                              "lista os processos (PID, estado, memoria)",    cmd_ps },
     { "processes", "processes",                       "o mesmo que ps",                               cmd_ps },
-    { "spawn",     "spawn <hello|worker|hog> [seg]",  "cria uma tarefa de demonstracao",              cmd_spawn },
+    { "spawn",     "spawn <hello|worker|hog|prog.rb> [seg]",  "cria uma tarefa (demo ou programa Ruby)",              cmd_spawn },
+    { "run",       "run <programa.rb> [args]",        "executa um programa Ruby (Ctrl+C interrompe)", cmd_run },
     { "kill",      "kill <pid>",                      "encerra um processo e libera a memoria dele",  cmd_kill },
 };
 

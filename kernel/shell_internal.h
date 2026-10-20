@@ -3,6 +3,7 @@
 #define RUBYOS_SHELL_INTERNAL_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 struct command {
     const char *name;
@@ -23,6 +24,9 @@ extern const struct command_group shell_group_system;    /* shell_sys.c  */
 
 /* Definido em shell.c, mas listado no grupo "sistema". */
 int shell_cmd_help(int argc, char **argv);
+
+#define PROC_DEMO_UNKNOWN (-100)
+int proc_spawn_demo(const char *name, uint32_t seconds);
 
 /* Imprime s e completa com espacos ate width colunas. */
 void shell_print_padded(const char *s, size_t width);
