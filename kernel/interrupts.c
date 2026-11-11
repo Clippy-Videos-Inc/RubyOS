@@ -143,10 +143,18 @@ void isr_handler(struct regs *r)
         kernel_panic("excecao da CPU nao tratada");
     } else {
         uint8_t irq = (uint8_t)(r->int_no - 32);
-        if (irq_handlers[irq] != NULL)
-            irq_handlers[irq](r);
+
+        /* O EOI e enviado ANTES do manipulador, nao depois: a partir da 0.4 o manipulador
+         * do timer pode trocar de contexto (preempcao) sem retornar logo em seguida, e o
+         * PIC so entrega novas interrupcoes depois do EOI desta. Se o EOI esperasse o
+         * retorno do manipulador, o sistema inteiro (teclado incluido) ficaria sem receber
+         * interrupcoes enquanto a tarefa interrompida estivesse fora da CPU. Isso e seguro
+         * porque IF continua zerado (interrupcoes de hardware desligadas) ate o iret que
+         * fecha esta ISR controlar o contrario; nao ha reentrancia de verdade. */
         if (irq >= 8)
             outb(PIC2_CMD, PIC_EOI);
         outb(PIC1_CMD, PIC_EOI);
+        if (irq_handlers[irq] != NULL)
+            irq_handlers[irq](r);
     }
 }

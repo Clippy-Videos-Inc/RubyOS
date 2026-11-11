@@ -165,9 +165,9 @@ static int run_redirected(const struct command *cmd, int argc, char **argv,
 
     err = fs_lookup(self->cwd, target, &node);
     if (err == FS_ENOENT)
-        err = fs_create(self->cwd, target, &node);
+        err = fs_create_as(self->cwd, target, self->uid, &node);
     if (err == FS_OK)
-        err = fs_write(node, buf, len, append);
+        err = fs_write_as(node, self->uid, buf, len, append);
     if (err != FS_OK) {
         kprintf("shell: %s: %s\n", target, fs_strerror(err));
         rc = 1;
@@ -216,6 +216,8 @@ static void shell_loop(void)
                               : ruby_run_foreground(argv[0], argc - 1, (const char *const *)&argv[1]);
             if (rc == RB_ENOTFOUND)
                 kprintf("Comando desconhecido: %s (digite 'help')\n", argv[0]);
+            else if (rc == RB_EACCES)
+                kprintf("%s: permissao negada (falta o bit de execucao; veja chmod)\n", argv[0]);
             else if (rc < 0)
                 kprintf("%s: nao foi possivel iniciar o programa (erro %d)\n", argv[0], rc);
             continue;
@@ -244,6 +246,11 @@ static void shell_task(void *arg)
 
 void shell_start(void)
 {
-    if (process_create("shell", shell_task, NULL, PROC_FLAG_ESSENTIAL) < 0)
+    int pid = process_create("shell", shell_task, NULL, PROC_FLAG_ESSENTIAL);
+
+    if (pid < 0)
         kernel_panic("nao foi possivel criar o processo da shell");
+    /* A shell interativa roda como o usuario comum (ver process.h, "su" eleva para root
+     * quando preciso): so o boot (init) continua root. */
+    process_set_uid(pid, UID_USER);
 }

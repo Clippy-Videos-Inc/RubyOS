@@ -101,8 +101,21 @@ module Shell
     end
   end
 
-  def self.ls_long(name, type, size)
+  MODE_BITS = "rwxrwxrwx".freeze
+
+  # "rwxr-xr-x" a partir de um modo octal de 9 bits (so dono/outros existem de verdade;
+  # o "grupo" do meio e sempre igual a "outros", so por familiaridade com um Unix de
+  # verdade -- ver ramfs.h).
+  def self.mode_str(mode)
+    expanded = ((mode & 0700) << 0) | ((mode & 07) << 3) | (mode & 07)
+    (0..8).map { |i| (expanded & (0400 >> i)) != 0 ? MODE_BITS[i] : "-" }.join
+  end
+
+  def self.ls_long(name, type, size, owner = nil, mode = nil)
     out(type == "dir" ? "d" : "-")
+    out(mode ? mode_str(mode) : "?????????")
+    out("  ")
+    out((owner || 0).to_s.rjust(4))
     out("  ")
     out(type == "dir" ? "       -" : size.to_s.rjust(8))
     out("  ")
@@ -144,7 +157,8 @@ module Shell
         if st[0] == "file"
           name = path.split("/").last || path
           if longfmt
-            ls_long(name, "file", st[1])
+            owner, mode = RubyOS::FS.perm(path)
+            ls_long(name, "file", st[1], owner, mode)
           else
             ls_name(name, "file")
             out("\n")
@@ -156,7 +170,8 @@ module Shell
         RubyOS::FS.entries(path).each do |name, type, size|
           w = name.size + (type == "dir" ? 1 : 0)
           if longfmt
-            ls_long(name, type, size)
+            owner, mode = RubyOS::FS.perm("#{path}/#{name}")
+            ls_long(name, type, size, owner, mode)
           elsif one
             ls_name(name, type)
             out("\n")
@@ -307,6 +322,106 @@ module Shell
     end
   end
 
+  command("Arquivos:", "chmod", "chmod <modo> <caminho>...", "troca as permissoes (octal, ex.: 644)") do |a|
+    if a.size < 2
+      out("Uso: chmod <modo-octal> <caminho>...  (ex.: chmod 600 segredo.txt)\n")
+      next 1
+    end
+    mode = begin
+      Integer(a[0], 8)
+    rescue ArgumentError, TypeError
+      nil
+    end
+    if mode.nil? || mode < 0 || mode > 0777
+      out("chmod: #{a[0]}: modo invalido (use octal, ex.: 644, 755)\n")
+      next 1
+    end
+    rc = 0
+    a[1, a.size - 1].each do |p|
+      begin
+        RubyOS::FS.chmod(p, mode)
+      rescue RubyOS::Error => e
+        err("chmod", p, e)
+        rc = 1
+      end
+    end
+    rc
+  end
+
+  command("Arquivos:", "chown", "chown <uid> <caminho>...", "troca o dono (so root)") do |a|
+    if a.size < 2 || !digits?(a[0])
+      out("Uso: chown <uid> <caminho>...  (so root pode trocar o dono)\n")
+      next 1
+    end
+    new_owner = a[0].to_i
+    rc = 0
+    a[1, a.size - 1].each do |p|
+      begin
+        RubyOS::FS.chown(p, new_owner)
+      rescue RubyOS::Error => e
+        err("chown", p, e)
+        rc = 1
+      end
+    end
+    rc
+  end
+
+  # ------------------------------------------------------- usuario / uid
+
+  def self.uid_name(u)
+    return "root" if u == 0
+    return "user" if u == 1000
+    "?"
+  end
+
+  command("Sistema:", "whoami", "whoami", "mostra o usuario atual") do |_a|
+    out("#{uid_name(RubyOS::Proc.uid)}\n")
+    0
+  end
+
+  command("Sistema:", "id", "id", "mostra o uid do usuario atual") do |_a|
+    u = RubyOS::Proc.uid
+    out("uid=#{u}(#{uid_name(u)})\n")
+    0
+  end
+
+  command("Sistema:", "su", "su <uid>", "troca de usuario (sem senha nesta versao)") do |a|
+    if a.size != 1 || !digits?(a[0])
+      out("Uso: su <uid>  (0 = root, 1000 = user)\n")
+      next 1
+    end
+    new_uid = a[0].to_i
+    # Sem autenticacao nesta versao (planejada para o futuro): ver kernel/shell_sys.c e
+    # README ("Permissoes: o que e e o que nao e").
+    RubyOS::Proc.setuid(new_uid)
+    out("agora voce e #{uid_name(new_uid)} (uid #{new_uid})\n")
+    0
+  end
+
+  # ------------------------------------------------------- disco / persistencia
+
+  command("Sistema:", "save", "save", "grava o ramfs inteiro no disco (so root)") do |_a|
+    begin
+      RubyOS::FS.save
+      out("ramfs salvo no disco.\n")
+      0
+    rescue RubyOS::Error => e
+      out("save: #{e.message}\n")
+      1
+    end
+  end
+
+  command("Sistema:", "load", "load", "substitui o ramfs pela imagem do disco (so root)") do |_a|
+    begin
+      RubyOS::FS.load
+      out("ramfs substituido pela imagem do disco. 'cd /home/user' se o diretorio atual sumiu.\n")
+      0
+    rescue RubyOS::Error => e
+      out("load: #{e.message}\n")
+      1
+    end
+  end
+
   # ----------------------------------------------------------- processos
 
   command("Processos:", "ps", "ps", "lista os processos (PID, estado, memoria)") do |_a|
@@ -322,10 +437,10 @@ module Shell
     COMMANDS["ps"][:fn].call(a)
   end
 
-  command("Processos:", "spawn", "spawn <hello|worker|hog|prog.rb> [seg]",
+  command("Processos:", "spawn", "spawn <hello|worker|hog|spin|prog.rb> [seg]",
           "cria uma tarefa (demo ou programa Ruby)") do |a|
     if a.empty? || a.size > 2
-      out("Uso: spawn <hello|worker|hog|programa.rb> [segundos]\n")
+      out("Uso: spawn <hello|worker|hog|spin|programa.rb> [segundos]\n")
       next 1
     end
     name = a[0]
@@ -342,7 +457,7 @@ module Shell
       unless pid
         path = RubyOS::Proc.find(name)
         unless path
-          out("spawn: programa desconhecido: #{name} (use hello, worker, hog ou um programa Ruby)\n")
+          out("spawn: programa desconhecido: #{name} (use hello, worker, hog, spin ou um programa Ruby)\n")
           next 1
         end
         pid = RubyOS::Proc.spawn(path, a[1, a.size - 1])

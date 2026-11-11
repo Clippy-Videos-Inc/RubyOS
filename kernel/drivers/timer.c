@@ -1,7 +1,12 @@
-/* kernel/drivers/timer.c - PIT canal 0 gerando IRQ 0 a TIMER_HZ */
+/* kernel/drivers/timer.c - PIT canal 0 gerando IRQ 0 a TIMER_HZ.
+ *
+ * A partir da 0.4, cada tick tambem alimenta o escalonador preemptivo
+ * (process_on_timer_tick, kernel/process.c): quando a fatia de tempo da tarefa atual
+ * acaba, o proprio tick forca uma troca de contexto. */
 #include "drivers/timer.h"
 #include "interrupts.h"
 #include "io.h"
+#include "../process.h"
 
 #define PIT_BASE_HZ 1193182u
 
@@ -11,6 +16,7 @@ static void timer_irq(struct regs *r)
 {
     (void)r;
     ticks++;
+    process_on_timer_tick();
 }
 
 void timer_init(void)

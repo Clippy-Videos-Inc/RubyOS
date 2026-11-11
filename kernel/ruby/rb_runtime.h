@@ -17,6 +17,7 @@
 
 #define RB_MAX_ARGS    12
 #define RB_ENOTFOUND   (-200)        /* programa Ruby nao encontrado */
+#define RB_EACCES      (-201)        /* achou o arquivo, mas falta o bit de execucao (0.4) */
 
 /* Copia os arquivos Ruby embutidos para o ramfs (cria os diretorios que faltarem). */
 void ruby_seed_filesystem(void);

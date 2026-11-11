@@ -189,6 +189,7 @@ static void job_entry(void *arg)
 int ruby_spawn(const char *path, int argc, const char *const *args, bool essential)
 {
     struct rb_job *job;
+    struct fs_node *node;
     size_t used = 0;
     const char *base;
     char name[PROC_NAME_MAX + 1];
@@ -198,6 +199,13 @@ int ruby_spawn(const char *path, int argc, const char *const *args, bool essenti
 
     if (argc < 0 || argc > RB_MAX_ARGS - 1)
         return PROC_ENOMEM;
+    /* Precisa do bit de execucao em "path", como execve(2) num Unix de verdade: tanto o
+     * "run"/spawn-por-nome da shell (ruby_spawn_program) quanto RubyOS::Proc.spawn direto
+     * (rb_bindings_spawn) passam por aqui, entao a checagem vale para os dois. */
+    if (fs_lookup(NULL, path, &node) != FS_OK || node->type != FS_FILE)
+        return RB_ENOTFOUND;
+    if (fs_check(node, process_current()->uid, FS_WANT_EXEC) != FS_OK)
+        return RB_EACCES;
     job = kmalloc(sizeof(*job));
     if (job == NULL)
         return PROC_ENOMEM;
@@ -309,7 +317,7 @@ int ruby_spawn_program(const char *name, int argc, const char *const *args)
 
     if (!ruby_find_program(name, path, sizeof(path)))
         return RB_ENOTFOUND;
-    return ruby_spawn(path, argc, args, false);
+    return ruby_spawn(path, argc, args, false);     /* checa o bit de execucao */
 }
 
 int ruby_run_foreground(const char *name, int argc, const char *const *args)
@@ -357,31 +365,51 @@ static void shell_entry(void *arg)
 void ruby_start_shell(const char *script)
 {
     size_t i;
+    int pid;
 
     if (script != NULL && script[0] != '\0') {
         for (i = 0; script[i] != '\0' && i + 1 < sizeof(shell_script); i++)
             shell_script[i] = script[i];
         shell_script[i] = '\0';
     }
-    if (process_create_ex("shell", shell_entry, NULL, PROC_FLAG_ESSENTIAL,
-                          PROC_RUBY_STACK, PROC_RUBY_HEAP) < 0)
+    pid = process_create_ex("shell", shell_entry, NULL, PROC_FLAG_ESSENTIAL,
+                            PROC_RUBY_STACK, PROC_RUBY_HEAP);
+    if (pid < 0)
         kernel_panic("nao foi possivel criar o processo da shell Ruby");
+    /* A RubyShell interativa roda como o usuario comum (ver process.h, "su" eleva para
+     * root quando preciso): so o boot (init) continua root. */
+    process_set_uid(pid, UID_USER);
 }
 
 /* --------------------------------------------------------------- semeadura */
 
-static void ensure_parent_dirs(const char *path)
+static void ensure_parent_dirs(const char *path, uint32_t uid)
 {
     char buf[FS_PATH_MAX];
     size_t i;
 
+    /* Cria sempre como root (ignora toda permissao) e so depois ajusta o dono: criar um
+     * diretorio que ainda nao existe e ser dono dele sao coisas diferentes, e nesta fase
+     * de semeadura um dos pais pode nao pertencer (ainda) a "uid". */
     for (i = 1; path[i] != '\0' && i < sizeof(buf) - 1; i++) {
         if (path[i] == '/') {
+            struct fs_node *d = NULL;
+
             memcpy(buf, path, i);
             buf[i] = '\0';
-            (void)fs_mkdir(NULL, buf, NULL);      /* FS_EEXIST e normal */
+            if (fs_mkdir_as(NULL, buf, UID_ROOT, &d) == FS_OK)  /* FS_EEXIST e normal */
+                d->owner = uid;
         }
     }
+}
+
+/* Os .rb embutidos na imagem viram "programas"/"bibliotecas": dono = root para o sistema
+ * (/apps /system /lib /bin), dono = usuario comum para os exemplos em /home/user (sao dele).
+ * Todos ganham o bit de execucao (0755): sem ele "run"/spawn-por-nome recusaria executa-los
+ * (ver fs_check com FS_WANT_EXEC em rb_runtime.c e shell_proc.c). */
+static uint32_t embedded_owner(const char *path)
+{
+    return (k_strlen(path) >= 6 && memcmp(path, "/home/", 6) == 0) ? UID_USER : UID_ROOT;
 }
 
 void ruby_seed_filesystem(void)
@@ -390,15 +418,20 @@ void ruby_seed_filesystem(void)
 
     for (i = 0; i < rb_embedded_count; i++) {
         const struct rb_embedded_file *f = &rb_embedded_files[i];
+        uint32_t uid = embedded_owner(f->path);
         struct fs_node *node;
         int err;
 
-        ensure_parent_dirs(f->path);
+        ensure_parent_dirs(f->path, uid);
         err = fs_lookup(NULL, f->path, &node);        /* ja existe: o arquivo embutido substitui */
         if (err == FS_ENOENT)
-            err = fs_create(NULL, f->path, &node);
+            err = fs_create_as(NULL, f->path, UID_ROOT, &node);  /* dono ajustado abaixo */
         if (err == FS_OK)
             err = fs_write(node, f->data, f->size, false);
+        if (err == FS_OK) {
+            node->owner = uid;
+            node->mode = 0755u;                        /* rwxr-xr-x: executavel por todos */
+        }
         if (err != FS_OK)
             kprintf("  aviso: nao foi possivel criar %s (%s)\n", f->path, fs_strerror(err));
     }

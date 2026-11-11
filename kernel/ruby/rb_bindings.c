@@ -56,6 +56,11 @@ static struct fs_node *cwd(void)
     return process_current()->cwd;
 }
 
+static uint32_t uid(void)
+{
+    return process_current()->uid;
+}
+
 static mrb_value sym_value(mrb_state *mrb, const char *name)
 {
     return mrb_symbol_value(mrb_intern_cstr(mrb, name));
@@ -218,6 +223,8 @@ static mrb_value fs_read_(mrb_state *mrb, mrb_value self)
     node = lookup_or_raise(mrb, path);
     if (node->type != FS_FILE)
         raise_fs(mrb, FS_EISDIR);
+    if (fs_check(node, uid(), FS_WANT_READ) != FS_OK)
+        raise_fs(mrb, FS_EACCES);
     return mrb_str_new(mrb, node->data != NULL ? (const char *)node->data : "", (mrb_int)node->size);
 }
 
@@ -234,11 +241,11 @@ static mrb_value fs_write_(mrb_state *mrb, mrb_value self)
     mrb_get_args(mrb, "zS|b", &path, &data, &append);
     err = fs_lookup(cwd(), path, &node);
     if (err == FS_ENOENT)
-        err = fs_create(cwd(), path, &node);
+        err = fs_create_as(cwd(), path, uid(), &node);
     if (err == FS_OK && node->type != FS_FILE)
         err = FS_EISDIR;
     if (err == FS_OK)
-        err = fs_write(node, RSTRING_PTR(data), (size_t)RSTRING_LEN(data), append != FALSE);
+        err = fs_write_as(node, uid(), RSTRING_PTR(data), (size_t)RSTRING_LEN(data), append != FALSE);
     if (err != FS_OK)
         raise_fs(mrb, err);
     return mrb_fixnum_value(RSTRING_LEN(data));
@@ -254,7 +261,7 @@ static mrb_value fs_touch(mrb_state *mrb, mrb_value self)
     mrb_get_args(mrb, "z", &path);
     err = fs_lookup(cwd(), path, &node);
     if (err == FS_ENOENT)
-        err = fs_create(cwd(), path, NULL);
+        err = fs_create_as(cwd(), path, uid(), NULL);
     if (err != FS_OK)
         raise_fs(mrb, err);
     return mrb_nil_value();
@@ -267,7 +274,7 @@ static mrb_value fs_mkdir_(mrb_state *mrb, mrb_value self)
 
     (void)self;
     mrb_get_args(mrb, "z", &path);
-    err = fs_mkdir(cwd(), path, NULL);
+    err = fs_mkdir_as(cwd(), path, uid(), NULL);
     if (err != FS_OK)
         raise_fs(mrb, err);
     return mrb_nil_value();
@@ -287,7 +294,7 @@ static mrb_value fs_rmdir(mrb_state *mrb, mrb_value self)
         raise_fs(mrb, FS_ENOTDIR);
     if (in_use_as_cwd(node))
         raise_msg(mrb, "e o diretorio atual de um processo");
-    err = fs_remove(node, false);
+    err = fs_remove_as(node, uid(), false);
     if (err != FS_OK)
         raise_fs(mrb, err);
     return mrb_nil_value();
@@ -308,7 +315,7 @@ static mrb_value fs_rm(mrb_state *mrb, mrb_value self)
         raise_msg(mrb, "e um diretorio (use rm -r ou rmdir)");
     if (in_use_as_cwd(node))
         raise_msg(mrb, "e o diretorio atual de um processo");
-    err = fs_remove(node, recursive != FALSE);
+    err = fs_remove_as(node, uid(), recursive != FALSE);
     if (err != FS_OK)
         raise_fs(mrb, err);
     return mrb_nil_value();
@@ -322,7 +329,7 @@ static mrb_value fs_cp(mrb_state *mrb, mrb_value self)
 
     (void)self;
     mrb_get_args(mrb, "zz", &src, &dst);
-    err = fs_copy(cwd(), src, dst);
+    err = fs_copy_as(cwd(), src, dst, uid());
     if (err != FS_OK)
         raise_fs(mrb, err);
     return mrb_nil_value();
@@ -336,7 +343,7 @@ static mrb_value fs_mv(mrb_state *mrb, mrb_value self)
 
     (void)self;
     mrb_get_args(mrb, "zz", &src, &dst);
-    err = fs_move(cwd(), src, dst);
+    err = fs_move_as(cwd(), src, dst, uid());
     if (err != FS_OK)
         raise_fs(mrb, err);
     return mrb_nil_value();
@@ -363,6 +370,8 @@ static mrb_value fs_chdir(mrb_state *mrb, mrb_value self)
     node = lookup_or_raise(mrb, path);
     if (node->type != FS_DIR)
         raise_fs(mrb, FS_ENOTDIR);
+    if (fs_check(node, uid(), FS_WANT_EXEC) != FS_OK)
+        raise_fs(mrb, FS_EACCES);
     process_current()->cwd = node;
     return mrb_nil_value();
 }
@@ -411,6 +420,91 @@ static mrb_value fs_entries(mrb_state *mrb, mrb_value self)
     return list;
 }
 
+/* perm(path) -> [dono_uid, modo] (modo: inteiro, mostre em octal com to_s(8)) */
+static mrb_value fs_perm(mrb_state *mrb, mrb_value self)
+{
+    const char *path;
+    struct fs_node *node;
+    mrb_value r;
+
+    (void)self;
+    mrb_get_args(mrb, "z", &path);
+    node = lookup_or_raise(mrb, path);
+    r = mrb_ary_new_capa(mrb, 2);
+    mrb_ary_push(mrb, r, mrb_fixnum_value((mrb_int)node->owner));
+    mrb_ary_push(mrb, r, mrb_fixnum_value((mrb_int)node->mode));
+    return r;
+}
+
+/* chmod(path, modo) -- so o dono ou root */
+static mrb_value fs_chmod_(mrb_state *mrb, mrb_value self)
+{
+    const char *path;
+    mrb_int mode;
+    struct fs_node *node;
+    int err;
+
+    (void)self;
+    mrb_get_args(mrb, "zi", &path, &mode);
+    node = lookup_or_raise(mrb, path);
+    err = fs_chmod(node, uid(), (uint16_t)mode);
+    if (err != FS_OK)
+        raise_fs(mrb, err);
+    return mrb_nil_value();
+}
+
+/* chown(path, novo_uid) -- so root */
+static mrb_value fs_chown_(mrb_state *mrb, mrb_value self)
+{
+    const char *path;
+    mrb_int new_owner;
+    struct fs_node *node;
+    int err;
+
+    (void)self;
+    mrb_get_args(mrb, "zi", &path, &new_owner);
+    node = lookup_or_raise(mrb, path);
+    err = fs_chown(node, uid(), (uint32_t)new_owner);
+    if (err != FS_OK)
+        raise_fs(mrb, err);
+    return mrb_nil_value();
+}
+
+/* save/load -- persistencia em disco (0.4): so root, como montar/formatar num Unix de
+ * verdade. "load" substitui o ramfs inteiro pelo que estiver salvo no disco. */
+static mrb_value fs_save_(mrb_state *mrb, mrb_value self)
+{
+    int err;
+
+    (void)self;
+    if (uid() != UID_ROOT)
+        raise_msg(mrb, "permissao negada (su 0; so root pode gravar a imagem no disco)");
+    err = fs_save();
+    if (err != FS_OK)
+        raise_fs(mrb, err);
+    return mrb_nil_value();
+}
+
+static mrb_value fs_load_(mrb_state *mrb, mrb_value self)
+{
+    int err;
+
+    (void)self;
+    if (uid() != UID_ROOT)
+        raise_msg(mrb, "permissao negada (su 0; so root pode substituir o ramfs pela imagem do disco)");
+    err = fs_load();
+    if (err != FS_OK)
+        raise_fs(mrb, err);
+    return mrb_nil_value();
+}
+
+static mrb_value fs_disk_image(mrb_state *mrb, mrb_value self)
+{
+    (void)mrb;
+    (void)self;
+    return mrb_bool_value(fs_disk_has_image());
+}
+
 /* limits -> [nome_max, caminho_max, arquivo_max] (constantes do ramfs) */
 static mrb_value fs_limits(mrb_state *mrb, mrb_value self)
 {
@@ -450,6 +544,10 @@ static mrb_value proc_spawn(mrb_state *mrb, mrb_value self)
     pid = rb_bindings_spawn(path, argc, argv);
     if (pid == PROC_ENOSLOT)
         mrb_raisef(mrb, error_class(mrb), "tabela de processos cheia (%d)", PROC_MAX);
+    if (pid == RB_ENOTFOUND)
+        raise_msg(mrb, "arquivo ou diretorio inexistente");
+    if (pid == RB_EACCES)
+        raise_msg(mrb, "permissao negada (falta o bit de execucao)");
     if (pid < 0)
         raise_msg(mrb, "sem memoria para criar o processo");
     return mrb_fixnum_value(pid);
@@ -604,6 +702,25 @@ static mrb_value proc_ppid(mrb_state *mrb, mrb_value self)
     (void)mrb;
     (void)self;
     return mrb_fixnum_value(process_current()->ppid);
+}
+
+static mrb_value proc_uid_(mrb_state *mrb, mrb_value self)
+{
+    (void)mrb;
+    (void)self;
+    return mrb_fixnum_value((mrb_int)process_current()->uid);
+}
+
+/* setuid(uid) -- troca o uid DESTE processo. Sem autenticacao nesta versao (ver "su" na
+ * RubyShell): mecanismo puro, qualquer processo pode virar qualquer uid. */
+static mrb_value proc_setuid(mrb_state *mrb, mrb_value self)
+{
+    mrb_int new_uid;
+
+    (void)self;
+    mrb_get_args(mrb, "i", &new_uid);
+    process_set_uid(process_current()->pid, (uint32_t)new_uid);
+    return mrb_nil_value();
 }
 
 /* ------------------------------------------------------------------- Sys */
@@ -789,6 +906,12 @@ void rb_bindings_init(mrb_state *mrb)
     DEF(fs, "stat", fs_stat, MRB_ARGS_REQ(1));
     DEF(fs, "entries", fs_entries, MRB_ARGS_REQ(1));
     DEF(fs, "limits", fs_limits, MRB_ARGS_NONE());
+    DEF(fs, "perm", fs_perm, MRB_ARGS_REQ(1));
+    DEF(fs, "chmod", fs_chmod_, MRB_ARGS_REQ(2));
+    DEF(fs, "chown", fs_chown_, MRB_ARGS_REQ(2));
+    DEF(fs, "save", fs_save_, MRB_ARGS_NONE());
+    DEF(fs, "load", fs_load_, MRB_ARGS_NONE());
+    DEF(fs, "disk_image?", fs_disk_image, MRB_ARGS_NONE());
 
     DEF(proc, "spawn", proc_spawn, MRB_ARGS_ARG(1, 1));
     DEF(proc, "spawn_demo", proc_spawn_demo_, MRB_ARGS_ARG(1, 1));
@@ -802,6 +925,8 @@ void rb_bindings_init(mrb_state *mrb)
     DEF(proc, "exit", proc_exit, MRB_ARGS_NONE());
     DEF(proc, "pid", proc_pid, MRB_ARGS_NONE());
     DEF(proc, "ppid", proc_ppid, MRB_ARGS_NONE());
+    DEF(proc, "uid", proc_uid_, MRB_ARGS_NONE());
+    DEF(proc, "setuid", proc_setuid, MRB_ARGS_REQ(1));
 
     DEF(sys, "uptime", sys_uptime, MRB_ARGS_NONE());
     DEF(sys, "ticks", sys_ticks, MRB_ARGS_NONE());

@@ -11,6 +11,11 @@ static struct fs_node *cwd(void)
     return process_current()->cwd;
 }
 
+static uint32_t uid(void)
+{
+    return process_current()->uid;
+}
+
 static void report(const char *cmd, const char *arg, int err)
 {
     kprintf("%s: %s: %s\n", cmd, arg, fs_strerror(err));
@@ -60,6 +65,8 @@ static int cmd_cd(int argc, char **argv)
     err = fs_lookup(cwd(), target, &node);
     if (err == FS_OK && node->type != FS_DIR)
         err = FS_ENOTDIR;
+    if (err == FS_OK)
+        err = fs_check(node, uid(), FS_WANT_EXEC);   /* "atravessar" um diretorio exige x */
     if (err != FS_OK) {
         report("cd", target, err);
         return 1;
@@ -86,12 +93,31 @@ static void ls_print_name(const struct fs_node *n)
     }
 }
 
+static void ls_print_mode(uint16_t mode)
+{
+    static const char *bits = "rwxrwxrwx";
+    int i;
+
+    /* So dono/outros existem de verdade (ver ramfs.h); o grupo do meio e so decorativo,
+     * sempre igual ao de "outros", para o formato ficar familiar de um Unix de verdade. */
+    uint16_t expanded = (uint16_t)(((mode & 0700u) << 0) | ((mode & 07u) << 3) | (mode & 07u));
+
+    for (i = 0; i < 9; i++)
+        terminal_putc((expanded & (0400u >> i)) ? bits[i] : '-');
+}
+
 static void ls_print_long(const struct fs_node *n)
 {
     char num[34];
     size_t len;
 
     terminal_putc(n->type == FS_DIR ? 'd' : '-');
+    ls_print_mode(n->mode);
+    terminal_write("  ");
+    k_utoa(n->owner, num, 10);
+    for (len = k_strlen(num); len < 5; len++)
+        terminal_putc(' ');
+    terminal_write(num);
     terminal_write("  ");
     if (n->type == FS_DIR) {
         terminal_write("       -");
@@ -203,7 +229,7 @@ static int cmd_mkdir(int argc, char **argv)
         return 1;
     }
     for (i = 1; i < argc; i++) {
-        int err = fs_mkdir(cwd(), argv[i], NULL);
+        int err = fs_mkdir_as(cwd(), argv[i], uid(), NULL);
         if (err != FS_OK) {
             report("mkdir", argv[i], err);
             rc = 1;
@@ -226,7 +252,7 @@ static int cmd_touch(int argc, char **argv)
         int err = fs_lookup(cwd(), argv[i], &node);
 
         if (err == FS_ENOENT)
-            err = fs_create(cwd(), argv[i], NULL);
+            err = fs_create_as(cwd(), argv[i], uid(), NULL);
         if (err != FS_OK) {
             report("touch", argv[i], err);
             rc = 1;
@@ -250,6 +276,8 @@ static int cmd_cat(int argc, char **argv)
 
         if (err == FS_OK && node->type != FS_FILE)
             err = FS_EISDIR;
+        if (err == FS_OK)
+            err = fs_check(node, uid(), FS_WANT_READ);
         if (err != FS_OK) {
             report("cat", argv[i], err);
             rc = 1;
@@ -300,7 +328,7 @@ static int cmd_rm(int argc, char **argv)
             rc = 1;
             continue;
         }
-        err = fs_remove(node, recursive);
+        err = fs_remove_as(node, uid(), recursive);
         if (err != FS_OK) {
             report("rm", argv[i], err);
             rc = 1;
@@ -330,7 +358,7 @@ static int cmd_rmdir(int argc, char **argv)
             continue;
         }
         if (err == FS_OK)
-            err = fs_remove(node, false);
+            err = fs_remove_as(node, uid(), false);
         if (err != FS_OK) {
             report("rmdir", argv[i], err);
             rc = 1;
@@ -351,7 +379,7 @@ static int cmd_cp(int argc, char **argv)
         kprintf("Uso: cp <origem> <destino>\n");
         return 1;
     }
-    err = fs_copy(cwd(), argv[1], argv[2]);
+    err = fs_copy_as(cwd(), argv[1], argv[2], uid());
     if (err != FS_OK) {
         report("cp", argv[1], err);
         return 1;
@@ -367,12 +395,87 @@ static int cmd_mv(int argc, char **argv)
         kprintf("Uso: mv <origem> <destino>\n");
         return 1;
     }
-    err = fs_move(cwd(), argv[1], argv[2]);
+    err = fs_move_as(cwd(), argv[1], argv[2], uid());
     if (err != FS_OK) {
         report("mv", argv[1], err);
         return 1;
     }
     return 0;
+}
+
+/* Converte um modo octal de ate 3 digitos ("644", "0755"...) para o valor numerico.
+ * Aceita um "0" na frente (opcional) so por costume Unix; nao exige. -1 se invalido. */
+static int parse_octal_mode(const char *s)
+{
+    int value = 0;
+    int digits = 0;
+
+    if (*s == '0')
+        s++;
+    for (; *s != '\0'; s++) {
+        if (*s < '0' || *s > '7' || digits >= 3)
+            return -1;
+        value = value * 8 + (*s - '0');
+        digits++;
+    }
+    return digits > 0 ? value : -1;
+}
+
+static int cmd_chmod(int argc, char **argv)
+{
+    int mode;
+    int rc = 0;
+    int i;
+
+    if (argc < 3) {
+        kprintf("Uso: chmod <modo-octal> <caminho>...  (ex.: chmod 600 segredo.txt)\n");
+        return 1;
+    }
+    mode = parse_octal_mode(argv[1]);
+    if (mode < 0) {
+        kprintf("chmod: %s: modo invalido (use octal, ex.: 644, 755)\n", argv[1]);
+        return 1;
+    }
+    for (i = 2; i < argc; i++) {
+        struct fs_node *node;
+        int err = fs_lookup(cwd(), argv[i], &node);
+
+        if (err == FS_OK)
+            err = fs_chmod(node, uid(), (uint16_t)mode);
+        if (err != FS_OK) {
+            report("chmod", argv[i], err);
+            rc = 1;
+        }
+    }
+    return rc;
+}
+
+static int cmd_chown(int argc, char **argv)
+{
+    uint32_t new_owner;
+    int rc = 0;
+    int i;
+
+    if (argc < 3) {
+        kprintf("Uso: chown <uid> <caminho>...  (so root pode trocar o dono)\n");
+        return 1;
+    }
+    if (!k_parse_uint(argv[1], &new_owner)) {
+        kprintf("chown: %s: uid invalido\n", argv[1]);
+        return 1;
+    }
+    for (i = 2; i < argc; i++) {
+        struct fs_node *node;
+        int err = fs_lookup(cwd(), argv[i], &node);
+
+        if (err == FS_OK)
+            err = fs_chown(node, uid(), new_owner);
+        if (err != FS_OK) {
+            report("chown", argv[i], err);
+            rc = 1;
+        }
+    }
+    return rc;
 }
 
 static const struct command commands[] = {
@@ -386,6 +489,8 @@ static const struct command commands[] = {
     { "rm",    "rm [-r] <caminho>...",      "remove arquivos (-r: diretorios e tudo dentro)",              cmd_rm },
     { "cp",    "cp <origem> <destino>",     "copia um arquivo (destino pode ser um diretorio)",            cmd_cp },
     { "mv",    "mv <origem> <destino>",     "move ou renomeia arquivos e diretorios",                      cmd_mv },
+    { "chmod", "chmod <modo> <caminho>...", "troca as permissoes (octal, ex.: 644)",                       cmd_chmod },
+    { "chown", "chown <uid> <caminho>...",  "troca o dono (so root)",                                      cmd_chown },
 };
 
 const struct command_group shell_group_files = {

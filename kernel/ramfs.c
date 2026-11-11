@@ -1,8 +1,9 @@
-/* kernel/ramfs.c - sistema de arquivos em RAM (ver ramfs.h) */
+/* kernel/ramfs.c - sistema de arquivos em RAM, com donos e permissoes (ver ramfs.h) */
 #include "ramfs.h"
 #include "heap.h"
 #include "kstring.h"
 #include "util.h"
+#include "process.h"    /* so para UID_ROOT: nenhuma outra dependencia de process.c */
 
 static struct fs_node *root;
 static uint32_t node_count;
@@ -139,6 +140,7 @@ static struct fs_node *new_node(const char *name, size_t len, enum fs_type type)
     memcpy(n->name, name, len);
     n->name[len] = '\0';
     n->type = type;
+    n->mode = (type == FS_DIR) ? (uint16_t)FS_MODE_DEFAULT_DIR : (uint16_t)FS_MODE_DEFAULT_FILE;
     node_count++;
     return n;
 }
@@ -300,7 +302,8 @@ bool fs_is_ancestor_or_self(const struct fs_node *a, const struct fs_node *b)
 
 /* ------------------------------------------------------------- criacao */
 
-static int create_node(struct fs_node *base, const char *path, enum fs_type type, struct fs_node **out)
+static int create_node(struct fs_node *base, const char *path, enum fs_type type,
+                       uint32_t uid, struct fs_node **out)
 {
     struct fs_node *parent;
     struct fs_node *n;
@@ -309,6 +312,9 @@ static int create_node(struct fs_node *base, const char *path, enum fs_type type
     int err;
 
     err = split_path(base, path, &parent, name);
+    if (err != FS_OK)
+        return err;
+    err = fs_check(parent, uid, FS_WANT_WRITE);     /* criar uma entrada exige escrita no pai */
     if (err != FS_OK)
         return err;
     nlen = k_strlen(name);
@@ -320,20 +326,80 @@ static int create_node(struct fs_node *base, const char *path, enum fs_type type
     n = new_node(name, nlen, type);
     if (n == NULL)
         return node_count >= FS_MAX_NODES ? FS_ENOSPC : FS_ENOMEM;
+    n->owner = uid;
     insert_child(parent, n);
     if (out != NULL)
         *out = n;
     return FS_OK;
 }
 
+int fs_mkdir_as(struct fs_node *base, const char *path, uint32_t uid, struct fs_node **out)
+{
+    return create_node(base, path, FS_DIR, uid, out);
+}
+
+int fs_create_as(struct fs_node *base, const char *path, uint32_t uid, struct fs_node **out)
+{
+    return create_node(base, path, FS_FILE, uid, out);
+}
+
 int fs_mkdir(struct fs_node *base, const char *path, struct fs_node **out)
 {
-    return create_node(base, path, FS_DIR, out);
+    return fs_mkdir_as(base, path, UID_ROOT, out);
 }
 
 int fs_create(struct fs_node *base, const char *path, struct fs_node **out)
 {
-    return create_node(base, path, FS_FILE, out);
+    return fs_create_as(base, path, UID_ROOT, out);
+}
+
+/* -------------------------------------------------------- donos e permissoes */
+
+int fs_check(const struct fs_node *node, uint32_t uid, int want)
+{
+    uint16_t mode;
+
+    if (node == NULL)
+        return FS_EINVAL;
+    if (uid == UID_ROOT)
+        return FS_OK;                      /* root ignora toda permissao, como num Unix de verdade */
+    mode = node->mode;
+    if (uid == node->owner) {
+        if ((want & FS_WANT_READ) != 0 && (mode & FS_PERM_OWNER_R) == 0)
+            return FS_EACCES;
+        if ((want & FS_WANT_WRITE) != 0 && (mode & FS_PERM_OWNER_W) == 0)
+            return FS_EACCES;
+        if ((want & FS_WANT_EXEC) != 0 && (mode & FS_PERM_OWNER_X) == 0)
+            return FS_EACCES;
+    } else {
+        if ((want & FS_WANT_READ) != 0 && (mode & FS_PERM_OTHER_R) == 0)
+            return FS_EACCES;
+        if ((want & FS_WANT_WRITE) != 0 && (mode & FS_PERM_OTHER_W) == 0)
+            return FS_EACCES;
+        if ((want & FS_WANT_EXEC) != 0 && (mode & FS_PERM_OTHER_X) == 0)
+            return FS_EACCES;
+    }
+    return FS_OK;
+}
+
+int fs_chmod(struct fs_node *node, uint32_t uid, uint16_t mode)
+{
+    if (node == NULL)
+        return FS_EINVAL;
+    if (uid != UID_ROOT && uid != node->owner)
+        return FS_EACCES;
+    node->mode = mode & (uint16_t)FS_PERM_MASK;
+    return FS_OK;
+}
+
+int fs_chown(struct fs_node *node, uint32_t uid, uint32_t new_owner)
+{
+    if (node == NULL)
+        return FS_EINVAL;
+    if (uid != UID_ROOT)
+        return FS_EACCES;
+    node->owner = new_owner;
+    return FS_OK;
 }
 
 /* -------------------------------------------------------------- escrita */
@@ -375,6 +441,17 @@ int fs_write(struct fs_node *file, const void *data, size_t len, bool append)
     return FS_OK;
 }
 
+/* Como fs_write, mas checa FS_WANT_WRITE em "file" antes (usado pela shell e por
+ * RubyOS::FS; fs_write continua sem checar nada, para o kernel e os testes de host). */
+int fs_write_as(struct fs_node *file, uint32_t uid, const void *data, size_t len, bool append)
+{
+    int err = fs_check(file, uid, FS_WANT_WRITE);
+
+    if (err != FS_OK)
+        return err;
+    return fs_write(file, data, len, append);
+}
+
 /* -------------------------------------------------------------- remocao */
 
 int fs_remove(struct fs_node *node, bool recursive)
@@ -386,6 +463,29 @@ int fs_remove(struct fs_node *node, bool recursive)
     unlink_child(node);
     free_subtree(node);
     return FS_OK;
+}
+
+/* Como fs_remove, mas checa FS_WANT_WRITE no diretorio PAI antes (apagar uma entrada e uma
+ * escrita no diretorio que a contem, como em qualquer Unix; a raiz nao tem pai e cai direto
+ * em fs_remove, que ja a protege com FS_EBUSY). */
+int fs_remove_as(struct fs_node *node, uint32_t uid, bool recursive)
+{
+    if (node != NULL && node->parent != NULL) {
+        int err = fs_check(node->parent, uid, FS_WANT_WRITE);
+        if (err != FS_OK)
+            return err;
+    }
+    return fs_remove(node, recursive);
+}
+
+/* Resolve o diretorio pai de "path" sem exigir que o ultimo componente exista (o nome
+ * final so e validado). Usado para checar permissao de escrita antes de criar algo que
+ * ainda nao existe (cp/mv para um caminho novo). */
+int fs_parent_of(struct fs_node *base, const char *path, struct fs_node **parent)
+{
+    char name[FS_NAME_MAX + 1];
+
+    return split_path(base, path, parent, name);
 }
 
 /* ----------------------------------------------------------- cp / mv */
@@ -509,6 +609,95 @@ int fs_move(struct fs_node *base, const char *src, const char *dst)
     return FS_OK;
 }
 
+/* ------------------------------------------------- cp / mv com permissao */
+
+/* Como fs_copy, mas exige leitura na origem e escrita no destino (no arquivo, se ja existir,
+ * senao no diretorio onde ele vai ser criado) antes de delegar a fs_copy. */
+int fs_copy_as(struct fs_node *base, const char *src, const char *dst, uint32_t uid)
+{
+    struct fs_node *s;
+    struct fs_node *d;
+    int err;
+
+    err = fs_lookup(base, src, &s);
+    if (err != FS_OK)
+        return err;
+    err = fs_check(s, uid, FS_WANT_READ);
+    if (err != FS_OK)
+        return err;
+
+    err = fs_lookup(base, dst, &d);
+    if (err == FS_OK) {
+        struct fs_node *target = d;
+
+        if (d->type == FS_DIR) {
+            struct fs_node *existing = find_child(d, s->name, k_strlen(s->name));
+            target = (existing != NULL) ? existing : d;      /* d: vai criar um filho novo ali */
+        }
+        err = fs_check(target, uid, FS_WANT_WRITE);
+        if (err != FS_OK)
+            return err;
+    } else if (err == FS_ENOENT) {
+        struct fs_node *parent;
+
+        err = fs_parent_of(base, dst, &parent);
+        if (err != FS_OK)
+            return err;
+        err = fs_check(parent, uid, FS_WANT_WRITE);
+        if (err != FS_OK)
+            return err;
+    } else {
+        return err;
+    }
+    err = fs_copy(base, src, dst);
+    if (err == FS_OK) {
+        struct fs_node *copy;
+
+        if (fs_lookup(base, dst, &copy) == FS_OK && copy->type == FS_FILE)
+            copy->owner = uid;                  /* a copia pertence a quem copiou */
+    }
+    return err;
+}
+
+/* Como fs_move, mas exige escrita no diretorio de origem (remover a entrada) e no de
+ * destino (criar/substituir a entrada) antes de delegar a fs_move. */
+int fs_move_as(struct fs_node *base, const char *src, const char *dst, uint32_t uid)
+{
+    struct fs_node *s;
+    struct fs_node *d;
+    int err;
+
+    err = fs_lookup(base, src, &s);
+    if (err != FS_OK)
+        return err;
+    if (s->parent == NULL)
+        return FS_EBUSY;
+    err = fs_check(s->parent, uid, FS_WANT_WRITE);
+    if (err != FS_OK)
+        return err;
+
+    err = fs_lookup(base, dst, &d);
+    if (err == FS_OK) {
+        struct fs_node *target_parent = (d->type == FS_DIR) ? d : d->parent;
+
+        err = fs_check(target_parent, uid, FS_WANT_WRITE);
+        if (err != FS_OK)
+            return err;
+    } else if (err == FS_ENOENT) {
+        struct fs_node *parent;
+
+        err = fs_parent_of(base, dst, &parent);
+        if (err != FS_OK)
+            return err;
+        err = fs_check(parent, uid, FS_WANT_WRITE);
+        if (err != FS_OK)
+            return err;
+    } else {
+        return err;
+    }
+    return fs_move(base, src, dst);
+}
+
 /* ---------------------------------------------------------- estado geral */
 
 static void count_nodes(const struct fs_node *n, struct fs_stats *st)
@@ -546,6 +735,8 @@ const char *fs_strerror(int err)
     case FS_EBUSY:        return "em uso ou protegido";
     case FS_ENAMETOOLONG: return "nome ou caminho longo demais";
     case FS_ENOMEM:       return "sem memoria";
+    case FS_EACCES:       return "permissao negada";
+    case FS_EIO:          return "erro de E/S no disco";
     default:              return "erro desconhecido";
     }
 }
@@ -557,16 +748,36 @@ struct seed_file {
     const char *text;
 };
 
-static const char *const seed_dirs[] = {
-    "/bin", "/system", "/home", "/home/user", "/etc", "/tmp", "/apps", "/lib"
+/* Donos iniciais: /bin /system /etc /apps /lib pertencem a root, como os diretorios de
+ * sistema de um Unix de verdade (0755: todos leem e atravessam, so root escreve). /home e
+ * /home/user pertencem ao usuario comum (UID_USER: ver process.h), que e quem efetivamente
+ * usa a shell interativa a partir desta versao. /tmp e de todos (0777, sem bit sticky: so
+ * ha um usuario de verdade por enquanto, entao ninguem apaga arquivo alheio sem querer). */
+struct seed_dir {
+    const char *path;
+    uint32_t owner;
+    uint16_t mode;
+};
+
+static const struct seed_dir seed_dirs[] = {
+    { "/bin",       UID_ROOT, FS_MODE_DEFAULT_DIR },
+    { "/system",    UID_ROOT, FS_MODE_DEFAULT_DIR },
+    { "/home",      UID_ROOT, FS_MODE_DEFAULT_DIR },
+    { "/home/user", UID_USER, FS_MODE_DEFAULT_DIR },
+    { "/etc",       UID_ROOT, FS_MODE_DEFAULT_DIR },
+    { "/tmp",       UID_ROOT, 0777u },
+    { "/apps",      UID_ROOT, FS_MODE_DEFAULT_DIR },
+    { "/lib",       UID_ROOT, FS_MODE_DEFAULT_DIR },
 };
 
 static const struct seed_file seed_files[] = {
     { "/etc/hostname", "rubyos\n" },
-    { "/etc/motd",     "Bem-vindo ao RubyOS 0.3\n" },
+    { "/etc/motd",     "Bem-vindo ao RubyOS 0.4\n" },
     { "/home/user/leia-me.txt",
       "Este e o seu diretorio pessoal.\n"
-      "O sistema de arquivos fica na RAM: tudo some ao reiniciar.\n"
+      "O sistema de arquivos fica na RAM por padrao: tudo some ao reiniciar, a menos que\n"
+      "voce rode 'save' antes de desligar (grava no disco) -- veja 'help save'.\n"
+      "Voce e o usuario comum (uid 1000): 'id' mostra quem voce e, 'su 0' vira root.\n"
       "Experimente:\n"
       "  mkdir projetos\n"
       "  echo ola > projetos/a.txt\n"
@@ -574,29 +785,79 @@ static const struct seed_file seed_files[] = {
       "  ls -l projetos\n" },
 };
 
+/* Cria uma raiz vazia nova, sem olhar para o que havia antes. */
+static int new_root(void)
+{
+    root = new_node("", 0, FS_DIR);
+    if (root == NULL)
+        return FS_ENOMEM;
+    root->owner = UID_ROOT;
+    root->mode = (uint16_t)FS_MODE_DEFAULT_DIR;
+    return FS_OK;
+}
+
+/* Libera a arvore atual (de verdade: todo no e todo dado liberado do heap) e cria uma
+ * raiz vazia no lugar, sem semeadura. Usado so por fs_load() (kernel/fs_persist.c), que
+ * reconstroi a arvore a partir do disco logo depois, NO MESMO HEAP ainda vivo -- ao
+ * contrario de fs_init(), que assume um heap recem-inicializado e por isso so descarta o
+ * ponteiro antigo (ver fs_init: chamar fs_reset() ali liberaria memoria de uma arvore que,
+ * do ponto de vista do heap que acabou de ser reinicializado, nunca existiu). */
+int fs_reset(void)
+{
+    if (root != NULL) {
+        struct fs_node *c = root->first_child;
+
+        while (c != NULL) {
+            struct fs_node *next = c->next_sibling;
+            free_subtree(c);
+            c = next;
+        }
+        kfree(root);
+    }
+    node_count = 0;
+    total_bytes = 0;
+
+    return new_root();
+}
+
 int fs_init(void)
 {
     size_t i;
     int err;
 
+    /* So descarta o ponteiro antigo (sem liberar nada): fs_init() e para um heap recem-
+     * inicializado (boot, ou os testes de host, que chamam heap_init() antes de cada
+     * caso). Se algum dia chamarmos fs_init() num heap ainda vivo com uma arvore de
+     * verdade por tras, e fs_load()/fs_reset() que se quer, nao isto. */
     root = NULL;
     node_count = 0;
     total_bytes = 0;
+    err = new_root();
+    if (err != FS_OK)
+        return err;
 
-    root = new_node("", 0, FS_DIR);
-    if (root == NULL)
-        return FS_ENOMEM;
-
+    /* A semeadura sempre CRIA como root (fs_mkdir_as/fs_create_as checam permissao de
+     * escrita no diretorio pai para o uid informado, e nessa fase os pais ainda nem tem o
+     * modo final aplicado) e so DEPOIS ajusta "owner" para o dono desejado -- criar e ser
+     * dono sao coisas diferentes aqui, como chown(2) depois de criar. */
     for (i = 0; i < sizeof(seed_dirs) / sizeof(seed_dirs[0]); i++) {
-        err = fs_mkdir(NULL, seed_dirs[i], NULL);
+        struct fs_node *d;
+
+        err = fs_mkdir_as(NULL, seed_dirs[i].path, UID_ROOT, &d);
         if (err != FS_OK)
             return err;
+        d->owner = seed_dirs[i].owner;
+        d->mode = seed_dirs[i].mode;
     }
     for (i = 0; i < sizeof(seed_files) / sizeof(seed_files[0]); i++) {
         struct fs_node *f;
-        err = fs_create(NULL, seed_files[i].path, &f);
+        bool in_home = k_strlen(seed_files[i].path) >= 11 &&
+                        memcmp(seed_files[i].path, "/home/user/", 11) == 0;
+
+        err = fs_create_as(NULL, seed_files[i].path, UID_ROOT, &f);
         if (err != FS_OK)
             return err;
+        f->owner = in_home ? UID_USER : UID_ROOT;
         err = fs_write(f, seed_files[i].text, k_strlen(seed_files[i].text), false);
         if (err != FS_OK)
             return err;

@@ -14,6 +14,7 @@
 #include "drivers/serial.h"
 #include "drivers/timer.h"
 #include "drivers/keyboard.h"
+#include "drivers/ata.h"
 
 const struct multiboot_info *g_boot_info = NULL;
 
@@ -127,11 +128,35 @@ void kmain(uint32_t magic, uint32_t mbi_addr)
     if (err != FS_OK)
         kernel_panic("falha ao criar o sistema de arquivos");
     fs_get_stats(&fst);
-    kprintf("  ramfs: %u diretorios, %u arquivos (somente RAM: some ao reiniciar)\n", fst.dirs, fst.files);
+    kprintf("  ramfs: %u diretorios, %u arquivos (semeadura padrao)\n", fst.dirs, fst.files);
+
+    kprintf("Initializing disk...\n");
+    if (ata_init()) {
+        kprintf("  disco IDE primario: %u setores (~%u MiB)\n",
+                ata_sector_count(), ata_sector_count() / 2048u);
+        if (fs_disk_has_image()) {
+            if (fs_load() == FS_OK) {
+                fs_get_stats(&fst);
+                kprintf("  imagem da RubyOS carregada do disco (%u diretorios, %u arquivos)\n",
+                        fst.dirs, fst.files);
+            } else {
+                kprintf("  aviso: nao foi possivel carregar a imagem do disco (mantendo a semeadura padrao)\n");
+            }
+        } else {
+            kprintf("  nenhuma imagem da RubyOS no disco ainda (comando 'save' cria uma)\n");
+        }
+    } else {
+        kprintf("  nenhum disco IDE (sem -drive no QEMU): persistencia desativada\n");
+    }
 
     kprintf("Initializing processes...\n");
     process_init(fs_root());
-    kprintf("  init (pid 1), escalonador cooperativo\n");
+    if (cmdline_has("preempt=off")) {
+        process_set_preempt(false);
+        kprintf("  init (pid 1), escalonador cooperativo (preempt=off)\n");
+    } else {
+        kprintf("  init (pid 1), escalonador preemptivo (fatia de %u ticks)\n", PROC_TIMESLICE_TICKS);
+    }
 
     kprintf("Initializing Ruby runtime...\n");
     ruby_seed_filesystem();

@@ -15,6 +15,7 @@ extern char stack_top[];
 static struct process table[PROC_MAX];
 static struct process *current;
 static int next_pid = 1;
+static bool preempt_enabled = true;
 
 /* O "dono" no heap de um processo e o indice da vaga + 1 (0 e o kernel). */
 static uint32_t owner_of(const struct process *p)
@@ -85,6 +86,7 @@ static void schedule(void)
     }
 
     next->state = PROC_RUNNING;
+    next->slice = PROC_TIMESLICE_TICKS;    /* fatia nova sempre que uma tarefa (re)assume a CPU */
     if (next == prev)
         return;
 
@@ -115,8 +117,10 @@ void process_init(struct fs_node *root)
     memcpy(p->name, "init", 5);
     p->state = PROC_RUNNING;
     p->essential = true;
+    p->uid = UID_ROOT;                     /* o boot (init) e o kernel: sempre root */
     p->base_mem = (uint32_t)(stack_top - stack_bottom);
     p->start_tick = timer_ticks();
+    p->slice = PROC_TIMESLICE_TICKS;
     p->cwd = root;
     current = p;
     heap_set_owner(owner_of(p));
@@ -172,11 +176,13 @@ int process_create_ex(const char *name, void (*entry)(void *), void *arg, uint32
         p->name[i] = name[i];
     p->name[i] = '\0';
     p->essential = (flags & PROC_FLAG_ESSENTIAL) != 0;
+    p->uid = current->uid;                 /* herda o dono de quem criou (su troca depois) */
     p->stack = stack;
     p->stack_size = stack_size;
     p->entry = entry;
     p->arg = arg;
     p->start_tick = timer_ticks();
+    p->slice = PROC_TIMESLICE_TICKS;
     p->cwd = current->cwd;
     heap_set_owner_limit(owner_of(p), heap_limit);
 
@@ -256,9 +262,45 @@ void process_sleep(uint32_t ticks)
     cpu_restore_flags(saved);
 }
 
+/* Chamada pelo driver do timer a cada IRQ0 (ver drivers/timer.c), com interrupcoes ja
+ * desabilitadas (convencao de qualquer manipulador de IRQ nesta kernel). So decrementa e
+ * forca uma troca quando a tarefa atual esta mesmo RUNNING: durante o laco ocioso de
+ * schedule() (cpu_hlt a espera de algo pronto) o estado e READY, e um tick ali nao deve
+ * provocar uma chamada recursiva a schedule(). */
+void process_on_timer_tick(void)
+{
+    if (!preempt_enabled || current == NULL || current->state != PROC_RUNNING)
+        return;
+    if (current->slice > 0)
+        current->slice--;
+    if (current->slice == 0)
+        schedule();                        /* schedule() da um slice novo a quem for escolhida */
+}
+
+void process_set_preempt(bool enabled)
+{
+    preempt_enabled = enabled;
+}
+
 struct process *process_current(void)
 {
     return current;
+}
+
+int process_set_uid(int pid, uint32_t uid)
+{
+    uint32_t saved = cpu_save_flags_cli();
+    int i;
+
+    for (i = 0; i < PROC_MAX; i++) {
+        if (table[i].state != PROC_UNUSED && table[i].pid == pid) {
+            table[i].uid = uid;
+            cpu_restore_flags(saved);
+            return PROC_OK;
+        }
+    }
+    cpu_restore_flags(saved);
+    return PROC_ESRCH;
 }
 
 bool process_alive(int pid)

@@ -94,6 +94,21 @@ static void task_hog(void *arg)
     kprintf("[hog] limite de memoria atingido apos %u KB (processo %d)\n", total, self->pid);
 }
 
+/* Laco ocupado que NUNCA cede a CPU sozinho (sem process_yield/process_sleep, sem syscall
+ * nenhuma): o pior caso que a 0.2/0.3 citavam como limitacao do escalonador cooperativo
+ * ("uma tarefa em C que nao cede trava o sistema"). A partir da 0.4, o timer a interrompe
+ * a cada PROC_TIMESLICE_TICKS mesmo assim, entao a shell e o resto do sistema continuam
+ * respondendo com ela rodando em segundo plano; so "kill" a encerra (ela nunca termina
+ * sozinha). */
+static void task_spin(void *arg)
+{
+    volatile uint32_t counter = 0;
+
+    (void)arg;
+    for (;;)
+        counter++;
+}
+
 /* Cria uma tarefa de demonstracao. Retorna o PID, PROC_ENOSLOT/PROC_ENOMEM, ou
  * PROC_DEMO_UNKNOWN se o nome nao existir. Usado pelas shells C e Ruby. */
 int proc_spawn_demo(const char *name, uint32_t seconds)
@@ -106,6 +121,8 @@ int proc_spawn_demo(const char *name, uint32_t seconds)
         entry = task_worker;
     else if (k_streq(name, "hog"))
         entry = task_hog;
+    else if (k_streq(name, "spin"))
+        entry = task_spin;
     else
         return PROC_DEMO_UNKNOWN;
     return process_create(name, entry, (void *)(uintptr_t)seconds, 0);
@@ -117,7 +134,7 @@ static int cmd_spawn(int argc, char **argv)
     int pid;
 
     if (argc < 2 || argc > 3) {
-        kprintf("Uso: spawn <hello|worker|hog|programa.rb> [segundos]\n");
+        kprintf("Uso: spawn <hello|worker|hog|spin|programa.rb> [segundos]\n");
         return 1;
     }
     if (k_streq(argv[1], "worker") && argc == 3 &&
@@ -130,12 +147,16 @@ static int cmd_spawn(int argc, char **argv)
     if (pid == PROC_DEMO_UNKNOWN) {
         pid = ruby_spawn_program(argv[1], argc - 2, (const char *const *)&argv[2]);
         if (pid == RB_ENOTFOUND) {
-            kprintf("spawn: programa desconhecido: %s (use hello, worker, hog ou um programa Ruby)\n", argv[1]);
+            kprintf("spawn: programa desconhecido: %s (use hello, worker, hog, spin ou um programa Ruby)\n", argv[1]);
             return 1;
         }
     }
     if (pid == PROC_ENOSLOT) {
         kprintf("spawn: tabela de processos cheia (%d)\n", PROC_MAX);
+        return 1;
+    }
+    if (pid == RB_EACCES) {
+        kprintf("spawn: %s: permissao negada (falta o bit de execucao; veja chmod)\n", argv[1]);
         return 1;
     }
     if (pid < 0) {
@@ -186,6 +207,10 @@ static int cmd_run(int argc, char **argv)
         kprintf("run: %s: programa Ruby nao encontrado\n", argv[1]);
         return 1;
     }
+    if (rc == RB_EACCES) {
+        kprintf("run: %s: permissao negada (falta o bit de execucao; veja chmod)\n", argv[1]);
+        return 1;
+    }
     if (rc < 0) {
         kprintf("run: nao foi possivel iniciar o programa (erro %d)\n", rc);
         return 1;
@@ -196,7 +221,7 @@ static int cmd_run(int argc, char **argv)
 static const struct command commands[] = {
     { "ps",        "ps",                              "lista os processos (PID, estado, memoria)",    cmd_ps },
     { "processes", "processes",                       "o mesmo que ps",                               cmd_ps },
-    { "spawn",     "spawn <hello|worker|hog|prog.rb> [seg]",  "cria uma tarefa (demo ou programa Ruby)",              cmd_spawn },
+    { "spawn",     "spawn <hello|worker|hog|spin|prog.rb> [seg]",  "cria uma tarefa (demo ou programa Ruby)",              cmd_spawn },
     { "run",       "run <programa.rb> [args]",        "executa um programa Ruby (Ctrl+C interrompe)", cmd_run },
     { "kill",      "kill <pid>",                      "encerra um processo e libera a memoria dele",  cmd_kill },
 };

@@ -4,9 +4,11 @@
 #include "terminal.h"
 #include "io.h"
 #include "kstring.h"
+#include "util.h"
 #include "heap.h"
 #include "memory.h"
 #include "ramfs.h"
+#include "process.h"
 #include "sysinfo.h"
 #include "drivers/rtc.h"
 #include "drivers/timer.h"
@@ -120,6 +122,92 @@ static int cmd_uptime(int argc, char **argv)
     return 0;
 }
 
+/* ---------------------------------------------------------- uid / permissoes */
+
+static const char *uid_name(uint32_t u)
+{
+    if (u == UID_ROOT)
+        return "root";
+    if (u == UID_USER)
+        return "user";
+    return "?";
+}
+
+static int cmd_whoami(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    kprintf("%s\n", uid_name(process_current()->uid));
+    return 0;
+}
+
+static int cmd_id(int argc, char **argv)
+{
+    uint32_t u = process_current()->uid;
+
+    (void)argc;
+    (void)argv;
+    kprintf("uid=%u(%s)\n", u, uid_name(u));
+    return 0;
+}
+
+static int cmd_su(int argc, char **argv)
+{
+    uint32_t new_uid;
+
+    if (argc != 2 || !k_parse_uint(argv[1], &new_uid)) {
+        kprintf("Uso: su <uid>  (0 = root, 1000 = user)\n");
+        return 1;
+    }
+    /* Sem autenticacao nesta versao (planejada para uma versao futura): "su" troca o uid
+     * do processo da shell livremente. Isso organiza quem é dono do que e deixa testar
+     * de verdade as permissoes, mas NAO e uma fronteira de seguranca -- documentado em
+     * README ("Permissoes: o que e e o que nao e"). */
+    process_set_uid(process_current()->pid, new_uid);
+    kprintf("agora voce e %s (uid %u)\n", uid_name(new_uid), new_uid);
+    return 0;
+}
+
+/* ------------------------------------------------------------ disco / persistencia */
+
+static int cmd_save(int argc, char **argv)
+{
+    int err;
+
+    (void)argc;
+    (void)argv;
+    if (process_current()->uid != UID_ROOT) {
+        kprintf("save: permissao negada (use 'su 0'; so root pode gravar a imagem no disco)\n");
+        return 1;
+    }
+    err = fs_save();
+    if (err != FS_OK) {
+        kprintf("save: %s\n", fs_strerror(err));
+        return 1;
+    }
+    kprintf("ramfs salvo no disco.\n");
+    return 0;
+}
+
+static int cmd_load(int argc, char **argv)
+{
+    int err;
+
+    (void)argc;
+    (void)argv;
+    if (process_current()->uid != UID_ROOT) {
+        kprintf("load: permissao negada (use 'su 0'; so root pode substituir o ramfs pela imagem do disco)\n");
+        return 1;
+    }
+    err = fs_load();
+    if (err != FS_OK) {
+        kprintf("load: %s\n", fs_strerror(err));
+        return 1;
+    }
+    kprintf("ramfs substituido pela imagem do disco. 'cd /home/user' se o diretorio atual sumiu.\n");
+    return 0;
+}
+
 static int cmd_reboot(int argc, char **argv)
 {
     (void)argc;
@@ -139,6 +227,11 @@ static const struct command commands[] = {
     { "clear",    "clear",                 "limpa a tela",                          cmd_clear },
     { "echo",     "echo [texto...]",       "imprime os argumentos",                 cmd_echo },
     { "about",    "about",                 "versao, CPU, memoria e arquitetura",    cmd_about },
+    { "whoami",   "whoami",                "mostra o usuario atual",                cmd_whoami },
+    { "id",       "id",                    "mostra o uid do usuario atual",         cmd_id },
+    { "su",       "su <uid>",              "troca de usuario (sem senha nesta versao)", cmd_su },
+    { "save",     "save",                  "grava o ramfs inteiro no disco (so root)", cmd_save },
+    { "load",     "load",                  "substitui o ramfs pela imagem do disco (so root)", cmd_load },
     { "memory",   "memory",                "memoria fisica, heap do kernel e ramfs", cmd_memory },
     { "date",     "date",                  "data atual (RTC)",                      cmd_date },
     { "time",     "time",                  "hora atual (RTC)",                      cmd_time },

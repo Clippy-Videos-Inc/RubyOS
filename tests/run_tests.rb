@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# tests/run_tests.rb - testes automatizados do RubyOS 0.3.
+# tests/run_tests.rb - testes automatizados do RubyOS 0.4.
 #
 # Uso:  ruby tests/run_tests.rb                     (shell padrao: RubyShell, em Ruby)
 #       RUBYOS_TEST_SHELL=c ruby tests/run_tests.rb  (a mesma suite contra a shell C de emergencia)
@@ -17,6 +17,9 @@
 #   7. Teclado PS/2 real, com teclas injetadas pelo monitor do QEMU (sendkey).
 #   8. Boot pela imagem ISO (GRUB) -- se grub-mkrescue estiver instalado.
 #   9. Runtime Ruby (0.3): programas, erros, apps (calc, edit, files, irb), Ctrl+C, memoria.
+#  10. Scheduler preemptivo (0.4): uma tarefa sem ponto de cessao nao trava mais o sistema.
+#  11. Permissoes (0.4): dono/outros, chmod/chown, su, bit de execucao exigido para rodar.
+#  12. Disco e persistencia (0.4): save/load sobrevivem a uma reinicializacao do QEMU.
 #
 # O QEMU roda sem janela (-display none); nada no seu computador e modificado.
 
@@ -116,9 +119,10 @@ def qemu_binary
   RubyOSTools.which('qemu-system-i386') || RubyOSTools.which('qemu-system-x86_64')
 end
 
-def with_qemu(boot_args, monitor: 'none', memory: '64M')
+def with_qemu(boot_args, monitor: 'none', memory: '64M', drive: nil)
   args = [qemu_binary, '-display', 'none', '-serial', 'stdio', '-monitor', monitor,
           '-no-reboot', '-m', memory, *boot_args]
+  args += ['-drive', "file=#{drive},format=raw,if=ide"] if drive
   session = QemuSession.new(args)
   yield session
 ensure
@@ -243,7 +247,7 @@ puts '== 3. Boot e comandos de sistema (QEMU -kernel) =='
 with_kernel do |vm|
   check('boot: banner, etapas de init e prompt') do
     out = vm.output
-    out.include?('RubyOS 0.3') &&
+    out.include?('RubyOS 0.4') &&
       out.include?('Ruby Powered Operating System') &&
       out.include?('Initializing kernel...') &&
       out.include?('Initializing memory...') &&
@@ -279,7 +283,7 @@ with_kernel do |vm|
 
   check('about mostra versao, kernel, runtime, CPU, memoria e arquitetura') do
     out = vm.command('about')
-    out.match?(/^RubyOS 0\.3$/) && out.match?(/^Kernel: 0\.3$/) && out.match?(/^Ruby Runtime: /) &&
+    out.match?(/^RubyOS 0\.4$/) && out.match?(/^Kernel: 0\.4$/) && out.match?(/^Ruby Runtime: /) &&
       out.match?(/^CPU: .+/) && out.match?(/^Memory: ~\d+ MB/) && out.match?(/^Architecture: i686/)
   end
 
@@ -335,9 +339,10 @@ with_kernel do |vm|
     out.include?('projetos/') && out.include?('teste.rb') && out.include?('leia-me.txt')
   end
 
-  check('ls -l mostra tipo e tamanho') do
+  check('ls -l mostra tipo, permissoes, dono e tamanho') do
     out = vm.command('ls -l')
-    out.match?(%r{^d\s+-\s+projetos/$}) && out.match?(/^-\s+0\s+teste\.rb$/)
+    out.match?(%r{^drwxr-xr-x\s+\d+\s+-\s+projetos/$}) &&
+      out.match?(/^-rw-r--r--\s+\d+\s+0\s+teste\.rb$/)
   end
 
   check('cat de arquivo vazio nao imprime erro') do
@@ -428,7 +433,7 @@ with_kernel do |vm|
     p = vm.command('cat /tmp/ps.txt')
     d = vm.command('cat /tmp/dois.txt')
     l.include?('home/') && l.include?('leia-me.txt') && p.match?(/^2\s+1\s+shell\s+RUNNING/) &&
-      d.include?('Bem-vindo ao RubyOS 0.3') && d.match?(/^rubyos$/) &&
+      d.include?('Bem-vindo ao RubyOS 0.4') && d.match?(/^rubyos$/) &&
       vm.command('echo a >').include?('sintaxe invalida') &&
       vm.command('> arq').include?('sintaxe invalida') &&
       vm.command('echo a > b > c').include?('sintaxe invalida')
@@ -668,7 +673,7 @@ with_kernel do |vm|
   end
 
   check('programa Ruby executa pelo nome (hello.rb, about) como comando') do
-    vm.command('hello.rb').include?('Ola, mundo!') && vm.command('about').match?(/^RubyOS 0\.3$/) &&
+    vm.command('hello.rb').include?('Ola, mundo!') && vm.command('about').match?(/^RubyOS 0\.4$/) &&
       vm.command('fib.rb 10').include?('0 1 1 2 3 5 8 13 21 34')
   end
 
@@ -686,6 +691,7 @@ with_kernel do |vm|
 
   check('erro de sintaxe e reportado com linha; programa inexistente da erro claro') do
     vm.command('echo "def x(" > /tmp/ruim.rb')
+    vm.command('chmod 755 /tmp/ruim.rb')   # echo > nao liga o bit de execucao; run precisa dele
     out = vm.command('run /tmp/ruim.rb')
     out.include?('SyntaxError') && out.match?(/line \d+/) &&
       vm.command('run naoexiste.rb').include?('nao encontrado') && vm.command('run').include?('Uso: run')
@@ -828,6 +834,7 @@ with_kernel do |vm|
 
   check('recursao infinita nao derruba o sistema (SystemStackError ou encerramento limpo)') do
     vm.command('echo "def f(n); f(n + 1); end; f(0)" > /tmp/rec.rb')
+    vm.command('chmod 755 /tmp/rec.rb')
     out = vm.command('run /tmp/rec.rb', timeout: 30)
     (out.include?('SystemStackError') || out.include?('pilha esgotada')) &&
       ps_rows(vm.command('ps')).length == 2 && vm.command('echo vivo').match?(/^vivo$/)
@@ -888,6 +895,109 @@ with_qemu(['-kernel', RubyOSTools::KERNEL_ELF, '-append', 'rubyshell=/nao/existe
     out.include?('ruby: /nao/existe.rb: arquivo ou diretorio inexistente') &&
       out.include?('iniciando a shell C de emergencia') && vm.command('echo salvo').match?(/^salvo$/) &&
       vm.command('run hello.rb').include?('Ola, mundo!')
+  end
+end
+
+# ---------------------------------------------------------- 10. scheduler preemptivo
+puts '== 10. Scheduler preemptivo =='
+with_kernel do |vm|
+  check('spawn spin: tarefa sem ponto de cessao nao trava mais o sistema (preempcao via PIT)') do
+    out = vm.command('spawn spin')
+    pid = out[/pid (\d+) \(spin\)/, 1]
+    next false unless pid
+
+    alive = ps_rows(vm.command('ps')).find { |r| r[:pid] == pid.to_i }
+    responsive = vm.command('echo ainda vivo').match?(/^ainda vivo$/)
+    killed = vm.command("kill #{pid}").include?("processo #{pid} encerrado")
+    alive && %w[READY RUNNING].include?(alive[:state]) && responsive && killed
+  end
+end
+
+with_qemu(['-kernel', RubyOSTools::KERNEL_ELF, '-append', 'preempt=off']) do |vm|
+  check('preempt=off: o kernel continua disponivel para o modo cooperativo das versoes anteriores') do
+    next false unless vm.wait_for(/RubyOS> \z/, timeout: 30)
+
+    vm.output.include?('escalonador cooperativo (preempt=off)') && vm.command('echo ok').match?(/^ok$/)
+  end
+end
+
+# ---------------------------------------------------------- 11. permissoes
+puts '== 11. Permissoes =='
+with_kernel do |vm|
+  check('a RubyShell interativa roda como "user" (uid 1000), nao como root') do
+    vm.command('whoami').match?(/^user$/) && vm.command('id').match?(/^uid=1000\(user\)$/)
+  end
+
+  check('arquivo novo pertence a quem criou; chmod muda o modo (dono ou root)') do
+    vm.command('echo ola > /tmp/meu.txt')
+    owner_ok = vm.command('ls -l /tmp/meu.txt').match?(/^-rw-r--r--\s+1000\s+4\s+meu\.txt$/)
+    vm.command('chmod 700 /tmp/meu.txt')
+    chmod_ok = vm.command('ls -l /tmp/meu.txt').match?(/^-rwx------\s+1000/)
+    owner_ok && chmod_ok
+  end
+
+  check('su troca de usuario; outro dono nao consegue escrever sem permissao de "outros"') do
+    vm.command('su 0')
+    vm.command('touch /tmp/do_root.txt')
+    vm.command('chmod 600 /tmp/do_root.txt')
+    root_owns = vm.command('ls -l /tmp/do_root.txt').match?(/^-rw-------\s+0\s/)
+    vm.command('su 1000')
+    denied = vm.command('echo invasao >> /tmp/do_root.txt').include?('permissao negada')
+    vm.command('su 0')
+    vm.command('rm /tmp/do_root.txt')
+    cleanup = vm.command('ls /tmp').include?('do_root.txt') == false
+    vm.command('su 1000')
+    root_owns && denied && cleanup
+  end
+
+  check('arquivo sem bit de execucao: run e spawn negam com mensagem clara') do
+    vm.command('echo "puts 1" > /tmp/semx.rb')
+    no_x = vm.command('ls -l /tmp/semx.rb').match?(/^-rw-r--r--/)
+    run_denied = vm.command('run /tmp/semx.rb').include?('permissao negada')
+    spawn_denied = vm.command('spawn /tmp/semx.rb').include?('permissao negada')
+    vm.command('chmod 755 /tmp/semx.rb')
+    run_ok = vm.command('run /tmp/semx.rb').match?(/^1$/)
+    no_x && run_denied && spawn_denied && run_ok
+  end
+end
+
+# ---------------------------------------------------------- 12. disco e persistencia
+puts '== 12. Disco e persistencia =='
+Dir.mktmpdir('rubyos-disk') do |dir|
+  disk = File.join(dir, 'disk.img')
+  File.open(disk, 'wb') { |f| f.truncate(RubyOSTools::DISK_IMAGE_BYTES) }
+
+  with_qemu(kernel_boot_args, drive: disk) do |vm|
+    check('sem imagem no disco ainda: o boot avisa e "load" relata erro de E/S') do
+      next false unless vm.wait_for(/RubyOS> \z/, timeout: 30)
+
+      boot_ok = vm.output.include?('disco IDE primario') && vm.output.include?('nenhuma imagem da RubyOS no disco')
+      vm.command('su 0')
+      boot_ok && vm.command('load').include?('erro de E/S no disco')
+    end
+
+    check('save (como root) grava a imagem no disco') do
+      vm.command('mkdir /tmp/sobrevive')
+      vm.command('echo "preservado entre reinicializacoes" > /tmp/sobrevive/dado.txt')
+      vm.command('save').include?('salvo no disco')
+    end
+  end
+
+  with_qemu(kernel_boot_args, drive: disk) do |vm|
+    check('reinicializando com o mesmo disco: o boot carrega a imagem salva automaticamente') do
+      next false unless vm.wait_for(/RubyOS> \z/, timeout: 30)
+
+      vm.output.include?('imagem da RubyOS carregada do disco') &&
+        vm.command('cat /tmp/sobrevive/dado.txt').match?(/^preservado entre reinicializacoes$/)
+    end
+
+    check('load (como root) tambem funciona sob demanda, sem reiniciar') do
+      vm.command('su 0')
+      vm.command('rm -r /tmp/sobrevive')
+      reloaded = vm.command('load').include?('substituido pela imagem do disco')
+      vm.command('su 1000')
+      reloaded && vm.command('cat /tmp/sobrevive/dado.txt').match?(/^preservado entre reinicializacoes$/)
+    end
   end
 end
 
