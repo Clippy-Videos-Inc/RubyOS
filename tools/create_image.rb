@@ -13,15 +13,20 @@ require_relative 'common'
 
 module RubyOSImage
   GRUB_CFG = <<~CFG
-    set timeout=1
+    set timeout=3
     set default=0
 
-    menuentry "RubyOS 0.3" {
+    menuentry "RubyOS 0.5" {
         multiboot /boot/kernel.elf
         boot
     }
 
-    menuentry "RubyOS 0.3 (shell C de emergencia)" {
+    menuentry "RubyOS 0.5 (interface grafica, gfx=1)" {
+        multiboot /boot/kernel.elf gfx=1
+        boot
+    }
+
+    menuentry "RubyOS 0.5 (shell C de emergencia)" {
         multiboot /boot/kernel.elf shell=c
         boot
     }
