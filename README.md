@@ -571,7 +571,21 @@ RubyOS/
 | 0.3 | Runtime Ruby (mruby), scripts, apps Ruby (calc, files, edit, irb), RubyShell em Ruby | feita e testada |
 | **0.4** | **Scheduler preemptivo (timer), driver de disco (ATA PIO) com persistencia (save/load), permissoes (donos/modo, su, chmod/chown)** | **feita e testada** |
 | **0.5** | **Interface grafica (RubyShell Desktop), janelas** | **feita e testada** |
-| 1.0 | Sistema integrado, documentacao, imagem final | planejada |
+| 0.6 | Paginacao de memoria, isolamento kernel/processo em anel 3, excecoes de protecao (page fault, GPF tratados sem derrubar o sistema) | planejada |
+| 0.7 | Kit de widgets graficos (botao, campo de texto, lista, menu) para o gerenciador de janelas, mais apps Ruby de exemplo com interface grafica | planejada |
+| 0.8 | Disco mais amplo (segundo disco/escravo, deteccao melhor do controlador, bitmap de blocos real) | planejada |
+| 0.9 | Video real via VESA BIOS (alem do Bochs dispi ja existente); melhorias de shell (pipes, historico, Tab, variaveis) | planejada |
+| 1.0 | Sistema integrado, documentacao, imagem final, testado em hardware real alem de QEMU/VirtualBox | planejada |
+
+A ordem 0.6 → 0.7 → 0.8 → 0.9 e proposital: a paginacao/anel 3 (0.6) entra primeiro para que os apps
+graficos da 0.7 ja nascam isolados do kernel, e o video real (0.9) fica por ultimo porque uma chamada de
+BIOS em modo real exige um trampolim mais simples de acertar depois que o esquema de memoria da 0.6 ja
+estiver definido.
+
+**Depois da 1.0:** um navegador de internet de verdade (placa de rede, pilha TCP/IP, parser HTML/CSS,
+motor de renderizacao) e, sozinho, tao grande quanto todo o roadmap 0.6-1.0 junto -- por isso fica como um
+arco proprio de versoes 1.x (1.1 rede, 1.2 motor HTML/CSS, 1.3 o app navegador), reaproveitando o
+isolamento da 0.6 e o kit de widgets da 0.7.
 
 ## Licenca
 
