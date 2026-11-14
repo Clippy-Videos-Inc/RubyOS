@@ -21,6 +21,21 @@ static size_t row;
 static size_t col;
 static uint8_t color = (uint8_t)(VGA_LIGHT_GREY | (VGA_BLACK << 4));
 
+/* Copia logica da tela (80x25, mesmo formato char+atributo da memoria de texto VGA real).
+ * E sempre mantida em dia, mesmo fora do modo grafico, para que o compositor (kernel/gfx)
+ * tenha de onde ler o conteudo do "terminal" quando ele vira uma janela na area de trabalho
+ * (ver terminal_set_gfx_backend()). */
+static uint16_t ram_screen[VGA_WIDTH * VGA_HEIGHT];
+
+/* true quando o modo grafico (0.5) esta ativo: a saida deixa de ir para a memoria de texto
+ * VGA (0xB8000) e para o CRTC (o monitor pode nem estar em modo texto), mas continua sendo
+ * escrita em ram_screen e espelhada na serial normalmente. */
+static bool gfx_backend;
+
+/* Incrementado a cada terminal_putc() (mesmo em modo grafico): deixa o compositor (kernel/gfx)
+ * saber que o conteudo do terminal mudou sem precisar comparar a tela inteira a cada quadro. */
+static uint32_t screen_generation;
+
 /* Captura de saida (redirecionamento da shell). */
 static char *cap_buf;
 static size_t cap_max;
@@ -33,9 +48,21 @@ static uint16_t vga_entry(char c, uint8_t attr)
     return (uint16_t)(uint8_t)c | (uint16_t)((uint16_t)attr << 8);
 }
 
+/* Escreve em ram_screen e, fora do modo grafico, tambem na memoria de texto VGA real. */
+static void screen_set(size_t index, uint16_t entry)
+{
+    ram_screen[index] = entry;
+    if (!gfx_backend)
+        vga[index] = entry;
+}
+
 static void update_cursor(void)
 {
-    uint16_t pos = (uint16_t)(row * VGA_WIDTH + col);
+    uint16_t pos;
+
+    if (gfx_backend)
+        return;                                 /* sem CRTC de texto para atualizar */
+    pos = (uint16_t)(row * VGA_WIDTH + col);
     outb(0x3D4, 0x0F);
     outb(0x3D5, (uint8_t)(pos & 0xFF));
     outb(0x3D4, 0x0E);
@@ -49,9 +76,9 @@ static void scroll(void)
 
     for (y = 1; y < VGA_HEIGHT; y++)
         for (x = 0; x < VGA_WIDTH; x++)
-            vga[(y - 1) * VGA_WIDTH + x] = vga[y * VGA_WIDTH + x];
+            screen_set((y - 1) * VGA_WIDTH + x, ram_screen[y * VGA_WIDTH + x]);
     for (x = 0; x < VGA_WIDTH; x++)
-        vga[(VGA_HEIGHT - 1) * VGA_WIDTH + x] = vga_entry(' ', color);
+        screen_set((VGA_HEIGHT - 1) * VGA_WIDTH + x, vga_entry(' ', color));
     row = VGA_HEIGHT - 1;
 }
 
@@ -80,7 +107,7 @@ void terminal_clear(void)
     const char *ansi_clear = "\x1b[2J\x1b[H";
 
     for (i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++)
-        vga[i] = vga_entry(' ', color);
+        screen_set(i, vga_entry(' ', color));
     row = 0;
     col = 0;
     update_cursor();
@@ -92,6 +119,29 @@ void terminal_init(void)
 {
     terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
     terminal_clear();
+}
+
+void terminal_set_gfx_backend(bool enabled)
+{
+    gfx_backend = enabled;
+}
+
+const uint16_t *terminal_screen_buffer(void)
+{
+    return ram_screen;
+}
+
+void terminal_get_cursor(size_t *out_row, size_t *out_col)
+{
+    if (out_row != NULL)
+        *out_row = row;
+    if (out_col != NULL)
+        *out_col = col;
+}
+
+uint32_t terminal_generation(void)
+{
+    return screen_generation;
 }
 
 bool terminal_capture_begin(char *buf, size_t cap, int owner_pid)
@@ -120,6 +170,7 @@ size_t terminal_capture_end(bool *truncated)
 
 void terminal_putc(char c)
 {
+    screen_generation++;
     if (cap_buf != NULL) {
         const struct process *cur = process_current();
         if (cur != NULL && cur->pid == cap_pid) {
@@ -150,10 +201,10 @@ void terminal_putc(char c)
             row--;
             col = VGA_WIDTH - 1;
         }
-        vga[row * VGA_WIDTH + col] = vga_entry(' ', color);
+        screen_set(row * VGA_WIDTH + col, vga_entry(' ', color));
         break;
     default:
-        vga[row * VGA_WIDTH + col] = vga_entry(c, color);
+        screen_set(row * VGA_WIDTH + col, vga_entry(c, color));
         col++;
         break;
     }

@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# tests/run_tests.rb - testes automatizados do RubyOS 0.4.
+# tests/run_tests.rb - testes automatizados do RubyOS 0.5.
 #
 # Uso:  ruby tests/run_tests.rb                     (shell padrao: RubyShell, em Ruby)
 #       RUBYOS_TEST_SHELL=c ruby tests/run_tests.rb  (a mesma suite contra a shell C de emergencia)
@@ -20,6 +20,9 @@
 #  10. Scheduler preemptivo (0.4): uma tarefa sem ponto de cessao nao trava mais o sistema.
 #  11. Permissoes (0.4): dono/outros, chmod/chown, su, bit de execucao exigido para rodar.
 #  12. Disco e persistencia (0.4): save/load sobrevivem a uma reinicializacao do QEMU.
+#  13. Interface grafica (0.5): modo VBE liga com gfx=1, cai para o modo texto sem VBE/placa
+#      compativel, e o shell pela serial continua funcionando identico com a area de
+#      trabalho ativa (ver kernel/gfx/).
 #
 # O QEMU roda sem janela (-display none); nada no seu computador e modificado.
 
@@ -198,6 +201,7 @@ if host_cc
     'heap' => %w[kernel/heap.c],
     'pmm' => %w[kernel/pmm.c],
     'ramfs' => %w[kernel/ramfs.c kernel/heap.c kernel/util.c],
+    'wm' => %w[kernel/gfx/wm.c kernel/util.c],
     # libc minima do runtime Ruby: renomeada (rbl_*) para nao colidir com a libc do PC
     'libc' => %w[kernel/libc/string.c kernel/libc/ctype.c kernel/libc/stdlib.c kernel/heap.c]
   }
@@ -247,7 +251,7 @@ puts '== 3. Boot e comandos de sistema (QEMU -kernel) =='
 with_kernel do |vm|
   check('boot: banner, etapas de init e prompt') do
     out = vm.output
-    out.include?('RubyOS 0.4') &&
+    out.include?('RubyOS 0.5') &&
       out.include?('Ruby Powered Operating System') &&
       out.include?('Initializing kernel...') &&
       out.include?('Initializing memory...') &&
@@ -283,7 +287,7 @@ with_kernel do |vm|
 
   check('about mostra versao, kernel, runtime, CPU, memoria e arquitetura') do
     out = vm.command('about')
-    out.match?(/^RubyOS 0\.4$/) && out.match?(/^Kernel: 0\.4$/) && out.match?(/^Ruby Runtime: /) &&
+    out.match?(/^RubyOS 0\.5$/) && out.match?(/^Kernel: 0\.5$/) && out.match?(/^Ruby Runtime: /) &&
       out.match?(/^CPU: .+/) && out.match?(/^Memory: ~\d+ MB/) && out.match?(/^Architecture: i686/)
   end
 
@@ -433,7 +437,7 @@ with_kernel do |vm|
     p = vm.command('cat /tmp/ps.txt')
     d = vm.command('cat /tmp/dois.txt')
     l.include?('home/') && l.include?('leia-me.txt') && p.match?(/^2\s+1\s+shell\s+RUNNING/) &&
-      d.include?('Bem-vindo ao RubyOS 0.4') && d.match?(/^rubyos$/) &&
+      d.include?('Bem-vindo ao RubyOS 0.5') && d.match?(/^rubyos$/) &&
       vm.command('echo a >').include?('sintaxe invalida') &&
       vm.command('> arq').include?('sintaxe invalida') &&
       vm.command('echo a > b > c').include?('sintaxe invalida')
@@ -673,7 +677,7 @@ with_kernel do |vm|
   end
 
   check('programa Ruby executa pelo nome (hello.rb, about) como comando') do
-    vm.command('hello.rb').include?('Ola, mundo!') && vm.command('about').match?(/^RubyOS 0\.4$/) &&
+    vm.command('hello.rb').include?('Ola, mundo!') && vm.command('about').match?(/^RubyOS 0\.5$/) &&
       vm.command('fib.rb 10').include?('0 1 1 2 3 5 8 13 21 34')
   end
 
@@ -998,6 +1002,30 @@ Dir.mktmpdir('rubyos-disk') do |dir|
       vm.command('su 1000')
       reloaded && vm.command('cat /tmp/sobrevive/dado.txt').match?(/^preservado entre reinicializacoes$/)
     end
+  end
+end
+
+puts '== 13. Interface grafica (0.5) =='
+with_qemu(['-kernel', RubyOSTools::KERNEL_ELF, '-append', 'gfx=1']) do |vm|
+  check('gfx=1: modo VBE liga (QEMU "-vga std", o padrao, suporta a interface Bochs dispi)') do
+    next false unless vm.wait_for(/RubyOS> \z/, timeout: 30)
+
+    vm.output.include?('Initializing interface grafica...') &&
+      vm.output.match?(/modo grafico: \d+x\d+x32 \(VBE\/Bochs dispi\), mouse PS\/2, Menu Iniciar/)
+  end
+
+  check('gfx=1: a shell pela serial continua identica, com a area de trabalho ativa') do
+    vm.command('about').match?(/^RubyOS 0\.5$/) &&
+      vm.command('ls /').include?('home/')
+  end
+end
+
+with_qemu(['-kernel', RubyOSTools::KERNEL_ELF, '-append', 'gfx=1', '-vga', 'none']) do |vm|
+  check('gfx=1 sem placa de video compativel: avisa e cai para o modo texto, sem travar') do
+    next false unless vm.wait_for(/RubyOS> \z/, timeout: 30)
+
+    vm.output.include?('modo grafico indisponivel') &&
+      vm.command('about').match?(/^RubyOS 0\.5$/)
   end
 end
 

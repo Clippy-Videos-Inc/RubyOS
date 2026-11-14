@@ -11,9 +11,31 @@ enum vga_color {
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+
+#define TERMINAL_COLS 80
+#define TERMINAL_ROWS 25
 
 void terminal_init(void);
 void terminal_clear(void);
+
+/* Modo grafico (0.5): enquanto habilitado, a saida do terminal para de ir para a memoria de
+ * texto VGA (0xB8000) e para o CRTC -- so para ram_screen (ver terminal_screen_buffer()) e
+ * para a serial, que continuam funcionando normalmente. Quem desenha a tela nesse caso e o
+ * compositor (kernel/gfx), renderizando ram_screen como o conteudo de uma janela. */
+void terminal_set_gfx_backend(bool enabled);
+
+/* TERMINAL_COLS * TERMINAL_ROWS entradas char+atributo (mesmo formato da memoria de texto
+ * VGA: byte baixo = caractere, byte alto = atributo fg/bg). Propriedade do terminal.c; so
+ * leitura. */
+const uint16_t *terminal_screen_buffer(void);
+
+/* Posicao atual do cursor de texto (para o compositor desenhar o caret). */
+void terminal_get_cursor(size_t *out_row, size_t *out_col);
+
+/* Incrementa a cada caractere escrito; o compositor compara com o valor da ultima vez que
+ * desenhou para saber se precisa redesenhar a janela do terminal. */
+uint32_t terminal_generation(void);
 
 /* Desvia a saida do processo owner_pid para buf (ate cap bytes) em vez de ir para a tela e
  * a serial. Saida de outros processos continua indo para a tela. Retorna false se ja ha

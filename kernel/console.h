@@ -30,6 +30,10 @@ int console_getc(void);
 /* Descarta tudo o que esta na fila. */
 void console_flush(void);
 
+/* Poe cada caractere de s na fila, como se tivesse sido digitado (usado pelo Menu Iniciar
+ * da interface grafica, 0.5, para "abrir" um programa dentro da janela do terminal). */
+void console_inject_string(const char *s);
+
 /* Processo em primeiro plano (0 = nenhum: a shell esta lendo a linha de comando). */
 void console_set_foreground(int pid);
 int  console_foreground(void);

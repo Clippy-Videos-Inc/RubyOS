@@ -28,6 +28,18 @@ static inline uint16_t inw(uint16_t port)
     return value;
 }
 
+static inline void outl(uint16_t port, uint32_t value)
+{
+    __asm__ volatile("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint32_t inl(uint16_t port)
+{
+    uint32_t value;
+    __asm__ volatile("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
 /* Pequena pausa: escrever na porta 0x80 leva ~1 us em PCs classicos. */
 static inline void io_wait(void)
 {

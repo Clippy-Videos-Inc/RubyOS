@@ -1,20 +1,25 @@
-# RubyOS 0.4
+# RubyOS 0.5
 
 Sistema operacional experimental que usa **Ruby como linguagem da camada de usuario**, com Assembly e C
 apenas onde sao tecnicamente necessarios.
 
-> **Estado real da 0.4:** inicializa no QEMU e **executa Ruby de verdade dentro do kernel**: o interpretador
+> **Estado real da 0.5:** inicializa no QEMU e **executa Ruby de verdade dentro do kernel**: o interpretador
 > [mruby](https://mruby.org) 3.3.0 esta embutido (compilado para i386 sem sistema operacional por baixo,
 > sobre uma libc minima escrita para este projeto). A shell (`RubyShell`), a calculadora, o gerenciador de
 > arquivos, o editor de texto e o REPL sao **programas Ruby** que rodam como processos do kernel, cada um
 > com seu proprio interpretador, memoria contada e limitada, e podem ser interrompidos com Ctrl+C ou `kill`.
-> A shell em C da 0.2 continua no kernel como **shell de emergencia**. Novo na 0.4: o escalonador e
-> **preemptivo** (um timer troca de tarefa sozinho: uma tarefa sem ponto de cessao nao trava mais o
-> sistema), o sistema de arquivos tem **donos e permissoes** (estilo Unix, so sem grupos), e os arquivos
-> **podem persistir em disco** (`save`/`load`, um driver ATA PIO simples). Limites importantes: o Ruby e o
-> **mruby (um subconjunto de Ruby)**, **sem Float** e com inteiros de 32 bits; a persistencia e so
+> A shell em C da 0.2 continua no kernel como **shell de emergencia**. O escalonador e **preemptivo** (um
+> timer troca de tarefa sozinho), o sistema de arquivos tem **donos e permissoes** (estilo Unix, so sem
+> grupos), e os arquivos **podem persistir em disco** (`save`/`load`, um driver ATA PIO simples). Novo na
+> 0.5: uma **interface grafica** opcional (`gfx=1` na linha de boot) com modo VBE (via a interface Bochs
+> "dispi", a mesma usada pelo QEMU/Bochs/VirtualBox), mouse PS/2 e um gerenciador de janelas simples (o
+> "RubyShell Desktop"): a shell de sempre passa a rodar dentro de uma janela arrastavel, ao lado de uma
+> janela "Sobre" e de uma barra de tarefas com Menu Iniciar. Limites importantes: o Ruby e o **mruby (um
+> subconjunto de Ruby)**, **sem Float** e com inteiros de 32 bits; a persistencia em disco e so
 > serializacao (nao e um sistema de arquivos em disco de verdade); os processos rodam no anel 0, **sem
-> isolamento real** (nenhuma permissao vale para o kernel em C). Veja [Limitacoes atuais](#limitacoes-atuais).
+> isolamento real** (nenhuma permissao vale para o kernel em C); a interface grafica e so uma "pele" por
+> cima do terminal de texto de sempre (ver [Interface grafica](#interface-grafica-rubyshell-desktop)).
+> Veja [Limitacoes atuais](#limitacoes-atuais).
 
 ## Objetivos
 
@@ -34,7 +39,9 @@ apenas onde sao tecnicamente necessarios.
         ↓                 (kernel/ruby/rb_bindings.c)         + libc minima (kernel/libc)
  Kernel (C)               processos, escalonador preemptivo (PIT), ramfs com donos/permissoes, disco (ATA
         ↓                 PIO) e persistencia, heap com donos, console, terminal, GDT/IDT/PIC, timer,
-        ↓                 teclado, serial, RTC; shell C de emergencia (kernel/shell*.c)
+        ↓                 teclado, mouse PS/2, serial, RTC; interface grafica opcional (kernel/gfx/:
+        ↓                 VBE/Bochs dispi, framebuffer, gerenciador de janelas); shell C de emergencia
+        ↓                 (kernel/shell*.c)
  Boot (Assembly + GRUB)   boot/boot.asm, boot/isr.asm, boot/switch.asm, kernel/libc/setjmp.asm
 ```
 
@@ -42,11 +49,13 @@ apenas onde sao tecnicamente necessarios.
 GDT, PIC, IDT, timer, teclado → `mm_init` (mapa de memoria, PMM, heap) → `fs_init` (arvore inicial) →
 `process_init` (o boot vira o processo 1, `init`) → `ruby_seed_filesystem` (copia os `.rb` embutidos na imagem
 para `/apps`, `/system`, `/lib` e `/home/user`) → `ruby_start_shell` cria o processo 2 (`shell`), que abre um
-interpretador mruby, carrega `/system/prelude.rb` e executa `/system/rubyshell.rb`. O `init` vira a tarefa ociosa.
+interpretador mruby, carrega `/system/prelude.rb` e executa `/system/rubyshell.rb` → (se `gfx=1`) `desktop_init`
+liga o modo grafico e cria a janela do terminal. O `init` vira a tarefa ociosa e, em modo grafico, tambem
+conduz o compositor (`desktop_tick`, chamado a cada interrupcao que acorda o `init`).
 
 **Se a RubyShell nao subir** (script ausente, erro, falta de memoria), o proprio processo `shell` cai na shell
 C: voce nunca fica sem console. Tambem da para pedi-la de proposito: no GRUB, a entrada
-"RubyOS 0.4 (shell C de emergencia)" passa `shell=c` na linha de comando do Multiboot. Tanto a RubyShell
+"RubyOS 0.5 (shell C de emergencia)" passa `shell=c` na linha de comando do Multiboot. Tanto a RubyShell
 quanto a shell C de emergencia rodam como o usuario comum (uid 1000, nao root) desde a 0.4.
 
 ### O runtime Ruby: como o mruby foi embutido
@@ -148,7 +157,44 @@ setores -- de proposito simples, para dar persistencia real sem reimplementar um
 
 **Console** (`kernel/console.c`): uma fila de entrada unica alimentada pelo teclado PS/2 e pela serial
 (com Ctrl+C detectado mesmo se o programa nao esta lendo). Toda saida vai para a tela VGA 80x25 **e** para a
-serial COM1.
+serial COM1 -- isso continua valendo em modo grafico (abaixo): a serial nunca para de espelhar o terminal.
+
+### Interface grafica ("RubyShell Desktop", `kernel/gfx/`)
+
+Opcional, ligada com `gfx=1` na linha de boot (ver [Execucao no QEMU](#execucao-no-qemu)). Sem esse
+parametro o sistema continua exatamente como nas versoes anteriores (texto, VGA 80x25).
+
+- **Modo grafico** (`kernel/drivers/vbe.c`): resolucao fixa 1024x768x32bpp, ligada atraves da interface
+  **Bochs VBE** ("dispi", portas 0x1CE/0x1CF) -- a mesma interface usada pelo QEMU (`-vga std`, o padrao),
+  pelo Bochs e pela VirtualBox. Nao precisa de chamadas de BIOS em modo real: so E/S em portas, depois de
+  achar o framebuffer linear pelo barramento PCI (`kernel/drivers/pci.c`, BAR0 do controlador de video,
+  classe 0x03). Sem VBE (placa de video incompativel) ou sem controlador de video no PCI, o boot avisa e
+  **cai de volta para o modo texto**, sem travar.
+- **Framebuffer** (`kernel/gfx/fb.c`): um back buffer em RAM onde tudo e desenhado -- so depois vai de uma
+  vez para a memoria de video de verdade (`fb_present`), para nao cintilar nem fazer leituras lentas da
+  placa. O texto usa a **fonte 8x16 de verdade da VGA**, extraida do hardware (plano 2 da memoria de
+  caracteres) antes de trocar de modo -- nao e uma fonte inventada.
+- **Mouse PS/2** (`kernel/drivers/mouse.c`): porta auxiliar do controlador 8042, IRQ 12, pacotes padrao de
+  3 bytes (posicao relativa + botoes).
+- **Gerenciador de janelas** (`kernel/gfx/wm.c`): so logica (geometria, ordem Z, foco, arrastar pela barra
+  de titulo, o Menu Iniciar) -- sem nenhuma chamada de hardware, de proposito, para dar para testar no PC
+  hospedeiro (`tests/host/test_wm.c`, como o ramfs/heap/pmm). Quem desenha de verdade e quem le o
+  mouse/teclado fica em `kernel/gfx/desktop.c`.
+- **A area de trabalho**: a shell de sempre (RubyShell ou a shell C) continua rodando exatamente igual --
+  o terminal de texto so passa a desenhar numa janela "Terminal" (arrastavel, mas nao fecha: e a shell do
+  sistema) em vez de ir direto para a tela. Uma segunda janela, "Sobre" (fechavel), mostra a versao do
+  sistema. Uma barra de tarefas com **Menu Iniciar** (o icone da gema de rubi) lista Terminal, Calculadora,
+  Arquivos e Sobre -- escolher Calculadora/Arquivos foca o terminal e digita o comando (`calc`/`files`) por
+  voce, como se voce tivesse digitado.
+- **Icones** (`assets/icons/*.png`, convertidos para `kernel/gfx/icons_data.c` por `tools/gen_icons.py`):
+  desenhados para este projeto. `tools/gen_icons.py` e uma ferramenta de desenvolvimento (precisa de Python
+  e Pillow) usada so quando os icones mudam -- o `.c` gerado ja fica no repositorio, entao compilar o
+  RubyOS nunca depende de Python.
+
+A interface grafica e, de proposito, **uma pele sobre o terminal de texto de sempre**, nao um ambiente
+grafico completo: nao ha aplicativos com sua propria janela grafica (so a shell de texto dentro de uma
+moldura), nem redimensionar janelas, nem suporte a varios terminais ao mesmo tempo. A troca de modo (texto
+↔ grafico) nunca muda o que a shell/o ramfs/os processos fazem -- so onde (e como) a saida e desenhada.
 
 ## Requisitos
 
@@ -225,12 +271,14 @@ qemu-system-i386   -kernel build/kernel.elf -nographic     # tudo no terminal (C
 qemu-system-i386   -kernel build/kernel.elf -append shell=c   # shell C de emergencia
 qemu-system-i386   -kernel build/kernel.elf -append preempt=off   # sem preempcao pelo timer (0.3)
 qemu-system-i386   -kernel build/kernel.elf -drive file=build/disk.img,format=raw,if=ide   # com disco
+qemu-system-i386   -kernel build/kernel.elf -append gfx=1   # com a interface grafica (0.5)
 ```
 
 Atalhos: `make run`, `make run-kernel`, `scripts/run.sh [iso|kernel|serial]`. Use `-m 64M` ou mais
 (com 16 MiB o sistema inicia, mas sobra pouco para varios programas Ruby). `scripts/run.sh kernel`/`serial`
 ja criam e anexam `build/disk.img` (8 MiB) automaticamente, para `save`/`load` funcionarem; a ISO (`iso`)
-continua sem disco anexado.
+continua sem disco anexado. Os parametros de boot combinam: `-append "gfx=1 shell=c"` liga a interface
+grafica com a shell C de emergencia dentro da janela do terminal, por exemplo.
 
 ## Usando a RubyShell
 
@@ -376,12 +424,13 @@ ruby tests/run_tests.rb        # ou: make test       (contra a RubyShell)
 make test-c                    # a mesma suite contra a shell C de emergencia
 ```
 
-A suite faz **99 verificacoes** no QEMU contra a RubyShell (menos contra a shell C: alguns testes so fazem
+A suite faz **104 verificacoes** no QEMU contra a RubyShell (menos contra a shell C: alguns testes so fazem
 sentido na Ruby):
 
 1. **testes unitarios em C no PC hospedeiro**, com AddressSanitizer e UBSan: `util`, `heap` (com
-   `krealloc`: 165 verificacoes), `pmm`, `ramfs` (com donos/permissoes e `fs_reset`: 3472 verificacoes) e
-   `libc` (a libc minima do runtime, 32 verificacoes);
+   `krealloc`: 165 verificacoes), `pmm`, `ramfs` (com donos/permissoes e `fs_reset`: 3472 verificacoes),
+   `libc` (a libc minima do runtime, 32 verificacoes) e `wm` (o gerenciador de janelas da interface
+   grafica, 0.5: geometria, ordem Z, foco, arrastar, Menu Iniciar -- 43 verificacoes);
 2. compilacao do kernel (incluindo o mruby) **sem avisos** e validacao do cabecalho Multiboot;
 3. boot no QEMU: banner, `help`, `echo`, `about`, `date`, `time`, `uptime`, `shutdown`, `reboot`;
 4. comandos de arquivos, redirecionamento e **ausencia de vazamento de heap do kernel**;
@@ -399,10 +448,24 @@ sentido na Ruby):
 11. **permissoes**: a shell roda como `user`, dono de arquivo novo, `chmod`/`chown`, `su` e a negacao real
     de escrita entre usuarios, e o bit de execucao exigido por `run`/`spawn`;
 12. **disco e persistencia**: `save`/`load` sobrevivem a uma reinicializacao completa do QEMU com o mesmo
-    disco, e `load` tambem funciona sob demanda sem reiniciar.
+    disco, e `load` tambem funciona sob demanda sem reiniciar;
+13. **interface grafica**: `gfx=1` liga o modo VBE (mensagem de sucesso com a resolucao), cai de volta para
+    o modo texto sem travar quando nao ha placa compativel (`-vga none`), e a shell pela serial continua
+    respondendo identica com a area de trabalho ativa (nenhuma regressao).
 
 `RUBYOS_TEST_ONLY=regex ruby tests/run_tests.rb` roda so os testes cujo nome casa (para depurar). O QEMU roda
-com `-display none`; nada no computador fisico e alterado.
+com `-display none`; nada no computador fisico e alterado. **Nota sobre o teste da interface grafica:** com
+`-display none` nao ha nenhum console "ativo" no QEMU para onde o monitor (`mouse_move`/`mouse_button`) ou o
+QMP (`input-send-event`) possam rotear eventos de mouse -- so chegam ao convidado com um backend de video de
+verdade (janela SDL/GTK, ou VNC). Por isso os testes automatizados cobrem o boot, o fallback e a ausencia de
+regressao por serial, e a logica de arrastar/focar/Menu Iniciar e coberta pelos 43 testes do `wm` no PC
+hospedeiro (sem hardware nenhum). O que foi confirmado com capturas de tela (`screendump` do QEMU) nesta
+versao: o modo grafico liga, a fonte (extraida do hardware VGA) desenha corretamente, e a area de trabalho
+(janela do terminal com o boot/a shell, barra de tarefas, icone da gema no Menu Iniciar, cursor) aparece como
+esperado; a propria IRQ do mouse foi confirmada recebendo e decodificando pacotes reais do dispositivo PS/2
+durante a inicializacao. A interacao de verdade (arrastar, clicar) depende de um display real (`make run` /
+`scripts/run.sh kernel` numa maquina com janela) e nao foi verificada dentro deste ambiente sem video --
+quem rodar localmente com `gfx=1` e uma janela do QEMU de verdade pode confirmar.
 
 ## Estrutura de diretorios
 
@@ -422,7 +485,11 @@ RubyOS/
 │   ├── ruby/              rb_runtime.c (processos Ruby), rb_bindings.c (RubyOS::*), rb_embedded.h
 │   ├── libc/              string, ctype, stdlib, errno, setjmp.asm + include/ (libc minima do mruby)
 │   ├── fs_persist.c       save/load: serializa o ramfs e grava/le pelo driver ATA (depende de hardware)
-│   └── drivers/           serial, timer (PIT), keyboard (PS/2), rtc (CMOS), ata (disco IDE, PIO)
+│   ├── drivers/           serial, timer (PIT), keyboard e mouse (PS/2), rtc (CMOS), ata (disco IDE, PIO),
+│   │                      pci (so leitura, acha o controlador de video), vbe (modo grafico, Bochs dispi)
+│   └── gfx/               interface grafica opcional (0.5): fb (framebuffer + fonte), icons (dados dos
+│                          icones), wm (gerenciador de janelas, logica pura/testavel), desktop (compositor)
+├── assets/icons/          PNGs de origem dos icones (ver tools/gen_icons.py)
 ├── ruby/
 │   ├── system/            prelude.rb, rubyshell.rb
 │   ├── apps/              calc, about, files, edit, irb, selftest
@@ -431,7 +498,7 @@ RubyOS/
 │   └── runtime/           mruby_build_config.rb (como o mruby e compilado)
 ├── third_party/mruby/     mruby 3.3.0 podado (MIT) + PATCHES.md
 ├── filesystem/            arquivos extras a embutir na imagem (alem dos .rb)
-├── tools/                 build.rb, embed.rb, create_image.rb, common.rb
+├── tools/                 build.rb, embed.rb, create_image.rb, common.rb, gen_icons.py (icones, opcional)
 ├── tests/                 run_tests.rb e testes unitarios em C (tests/host/)
 ├── scripts/run.sh   Makefile   README.md   LICENSE
 ```
@@ -477,6 +544,19 @@ RubyOS/
 - **`cp` nao copia diretorios.** Sem links nem `find`. Timestamps continuam sem existir.
 - **Driver de disco minimo:** so ATA PIO, barramento primario, disco mestre, LBA28 (sem DMA, sem escravo,
   sem ATAPI, sem discos > 128 GiB).
+- **Interface grafica e so uma "pele" por cima do console.** O RubyShell Desktop (`kernel/gfx/`) desenha a
+  mesma tela de texto 80x25 de sempre dentro de uma janela, mais uma janela de informacoes e o Menu
+  Iniciar; nao ha varios terminais, redimensionar janelas, mover por arrastar-e-soltar testado de ponta a
+  ponta, nem apps graficos de verdade. So existe quando o kernel e iniciado com `gfx=1` na linha de comando;
+  sem isso (ou sem VBE disponivel), o sistema cai de volta no console VGA de texto puro, igual as versoes
+  anteriores.
+- **Mouse PS/2 funciona, mas a interacao por clique/arraste nao foi verificada automaticamente.** O driver
+  (`kernel/drivers/mouse.c`) troca pacotes com o controlador 8042 corretamente (confirmado por log serial
+  durante o desenvolvimento), mas o ambiente de testes automatizado roda QEMU com `-display none`, e nessa
+  configuracao os comandos de mouse do QEMU (HMP `mouse_move`/`mouse_button`, QMP `input-send-event`) nao
+  tem para onde entregar eventos sinteticos — por isso os testes automatizados cobrem boot/fallback/regressao
+  da shell com `gfx=1`, mas nao clique ou arrasto de janela real; isso so foi visto funcionando manualmente
+  com tela de verdade.
 - **32 bits** (i686), RAM acima de 4 GiB nao e usada. Sem paginacao.
 - Teclado: layout US. Pela serial, setas inserem lixo na linha.
 - `shutdown` so desliga em VMs; `date`/`time` mostram o que o RTC informar (assume seculo 20xx).
@@ -490,7 +570,7 @@ RubyOS/
 | 0.2 | Memoria, filesystem, comandos de arquivos, processos basicos | feita e testada |
 | 0.3 | Runtime Ruby (mruby), scripts, apps Ruby (calc, files, edit, irb), RubyShell em Ruby | feita e testada |
 | **0.4** | **Scheduler preemptivo (timer), driver de disco (ATA PIO) com persistencia (save/load), permissoes (donos/modo, su, chmod/chown)** | **feita e testada** |
-| 0.5 | Interface grafica (RubyShell Desktop), janelas | planejada |
+| **0.5** | **Interface grafica (RubyShell Desktop), janelas** | **feita e testada** |
 | 1.0 | Sistema integrado, documentacao, imagem final | planejada |
 
 ## Licenca

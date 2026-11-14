@@ -15,6 +15,8 @@
 #include "drivers/timer.h"
 #include "drivers/keyboard.h"
 #include "drivers/ata.h"
+#include "gfx/fb.h"
+#include "gfx/desktop.h"
 
 const struct multiboot_info *g_boot_info = NULL;
 
@@ -163,6 +165,17 @@ void kmain(uint32_t magic, uint32_t mbi_addr)
     fs_get_stats(&fst);
     kprintf("  %s, programas Ruby em /apps /system /lib (%u arquivos no ramfs)\n", RUNTIME_VERSION, fst.files);
 
+    if (cmdline_has("gfx=1")) {
+        kprintf("Initializing interface grafica...\n");
+        if (desktop_init()) {
+            kprintf("  modo grafico: %ux%ux32 (VBE/Bochs dispi), mouse PS/2, Menu Iniciar\n",
+                    fb_width(), fb_height());
+        } else {
+            kprintf("  modo grafico indisponivel (sem VBE/placa compativel nesta maquina): "
+                    "continuando em modo texto\n");
+        }
+    }
+
     kprintf("\nRubyOS iniciado.\n\n");
     if (cmdline_has("shell=c")) {
         kprintf("(shell=c: usando a shell C de emergencia)\n\n");
@@ -175,9 +188,12 @@ void kmain(uint32_t magic, uint32_t mbi_addr)
     }
 
     /* O boot virou o processo "init", que tambem faz o papel de tarefa ociosa: dorme
-     * ate a proxima interrupcao e cede a CPU para quem estiver pronto. */
+     * ate a proxima interrupcao e cede a CPU para quem estiver pronto. Em modo grafico
+     * (gfx=1), tambem e quem conduz o compositor: cada despertar (IRQ do timer ou do
+     * mouse) e uma chance de redesenhar a area de trabalho, se algo mudou. */
     for (;;) {
         cpu_hlt();
+        desktop_tick();
         process_yield();
     }
 }

@@ -74,6 +74,12 @@ void console_flush(void)
     head = tail = 0;
 }
 
+void console_inject_string(const char *s)
+{
+    while (*s != '\0')
+        enqueue((unsigned char)*s++);
+}
+
 void console_set_foreground(int pid)
 {
     foreground = pid;
