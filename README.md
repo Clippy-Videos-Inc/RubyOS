@@ -1,23 +1,30 @@
-# RubyOS 0.5
+# RubyOS 0.6 ("Anel")
 
 Sistema operacional experimental que usa **Ruby como linguagem da camada de usuario**, com Assembly e C
 apenas onde sao tecnicamente necessarios.
 
-> **Estado real da 0.5:** inicializa no QEMU e **executa Ruby de verdade dentro do kernel**: o interpretador
+> **Estado real da 0.6:** inicializa no QEMU e **executa Ruby de verdade dentro do kernel**: o interpretador
 > [mruby](https://mruby.org) 3.3.0 esta embutido (compilado para i386 sem sistema operacional por baixo,
 > sobre uma libc minima escrita para este projeto). A shell (`RubyShell`), a calculadora, o gerenciador de
 > arquivos, o editor de texto e o REPL sao **programas Ruby** que rodam como processos do kernel, cada um
 > com seu proprio interpretador, memoria contada e limitada, e podem ser interrompidos com Ctrl+C ou `kill`.
 > A shell em C da 0.2 continua no kernel como **shell de emergencia**. O escalonador e **preemptivo** (um
 > timer troca de tarefa sozinho), o sistema de arquivos tem **donos e permissoes** (estilo Unix, so sem
-> grupos), e os arquivos **podem persistir em disco** (`save`/`load`, um driver ATA PIO simples). Novo na
-> 0.5: uma **interface grafica** opcional (`gfx=1` na linha de boot) com modo VBE (via a interface Bochs
+> grupos), e os arquivos **podem persistir em disco** (`save`/`load`, um driver ATA PIO simples). Uma
+> **interface grafica** opcional (`gfx=1` na linha de boot) oferece modo VBE (via a interface Bochs
 > "dispi", a mesma usada pelo QEMU/Bochs/VirtualBox), mouse PS/2 e um gerenciador de janelas simples (o
 > "RubyShell Desktop"): a shell de sempre passa a rodar dentro de uma janela arrastavel, ao lado de uma
-> janela "Sobre" e de uma barra de tarefas com Menu Iniciar. Limites importantes: o Ruby e o **mruby (um
+> janela "Sobre" e de uma barra de tarefas com Menu Iniciar. Novo na 0.6 ("Anel"): **paginacao de memoria
+> de verdade** (identidade de 4 GiB com paginas de 4 MiB, PSE) e **isolamento real em anel 3**: processos de
+> demonstracao (`spawn ring3`) rodam com hardware impedindo acesso ao kernel, falam com ele so por
+> `int 0x80` (syscall), e uma falha de pagina ou protecao geral (`spawn ring3fault`, `spawn ring3gpf`) **e
+> tratada e recuperada** -- so o processo que falhou morre, o sistema continua de pe (ver
+> [Paginacao e modo usuario](#paginacao-e-modo-usuario-anel-3)). Limites importantes: o Ruby e o **mruby (um
 > subconjunto de Ruby)**, **sem Float** e com inteiros de 32 bits; a persistencia em disco e so
-> serializacao (nao e um sistema de arquivos em disco de verdade); os processos rodam no anel 0, **sem
-> isolamento real** (nenhuma permissao vale para o kernel em C); a interface grafica e so uma "pele" por
+> serializacao (nao e um sistema de arquivos em disco de verdade); so os processos de demonstracao em
+> Assembly rodam de fato em anel 3 -- os processos Ruby e os comandos da shell continuam em anel 0 (nao ha
+> ainda um carregador de executaveis de usuario nem CR3 por processo; ver
+> [Limitacoes atuais](#limitacoes-atuais)); a interface grafica e so uma "pele" por
 > cima do terminal de texto de sempre (ver [Interface grafica](#interface-grafica-rubyshell-desktop)).
 > Veja [Limitacoes atuais](#limitacoes-atuais).
 
@@ -139,9 +146,41 @@ permissoes de verdade, mas nao e uma fronteira de seguranca). `whoami`/`id` most
 `chmod <octal> <caminho>` muda o modo (dono ou root); `chown <uid> <caminho>` troca o dono (so root).
 Rodar um arquivo (`run`/`spawn`, ou pelo nome) exige o bit de execucao; criar/apagar/escrever exige escrita
 no diretorio (apagar) ou no proprio arquivo (escrever); negado vira `RubyOS::Error` ("permissao negada") na
-shell Ruby ou uma mensagem equivalente na shell C. **Nao e isolamento real**: tudo roda no anel 0, e o
-kernel em C (e qualquer coisa que rode como root) pode ignorar as checagens -- e um modelo de permissoes
-sobre um unico espaco de memoria compartilhado, nao uma fronteira de seguranca entre processos.
+shell Ruby ou uma mensagem equivalente na shell C. **Nao e isolamento real pelas permissoes em si**: elas
+sao um modelo sobre um unico espaco de memoria, nao uma fronteira de seguranca -- mas a 0.6 adiciona uma
+fronteira de verdade, em hardware, para quem roda em anel 3 (ver a seguir).
+
+### Paginacao e modo usuario (anel 3) (`kernel/paging.c`, `kernel/syscall.c`, `kernel/ring3_demo.c`)
+
+Novo na 0.6. `kernel/paging.c` liga a paginacao x86 (`pg_init()`, chamado no boot) com um **Page Directory
+unico, identidade de 4 GiB usando paginas de 4 MiB (PSE, CR4.PSE)**: todo endereco fisico fica mapeado no
+mesmo endereco virtual, supervisor-only por padrao. Isso significa **zero mudanca** em qualquer driver ou
+subsistema existente (framebuffer, heap, pilhas) -- eles continuam enxergando os mesmos enderecos de
+sempre. Quando um processo precisa de uma pagina acessivel em anel 3, `pg_make_user_accessible()` faz
+"remendo de janela": troca so a PDE de 4 MiB daquele endereco por uma tabela de 4 KiB normal, com a pagina
+pedida marcada `U=1` e todas as outras 1023 entradas daquela janela replicando a identidade original (como
+supervisor-only) -- as outras 4092 paginas inalteradas continuam como paginas de 4 MiB.
+
+A GDT ganhou segmentos de anel 3 (codigo/dados, DPL 3) e uma TSS (`esp0`/`ss0` atualizados a cada troca de
+contexto, para que uma interrupcao vinda do anel 3 va parar numa pilha do kernel valida). `enter_usermode()`
+(`boot/switch.asm`) monta manualmente o quadro que a CPU monta sozinha ao entrar numa interrupcao, e executa
+`iret`: como o CS de destino tem RPL 3, o `iret` troca de privilegio, troca `SS:ESP` tambem, e o processo
+passa a rodar em anel 3 de verdade. `kernel/syscall.c` atende `int 0x80` (unico vetor com DPL 3 na IDT --
+todos os outros 47 continuam DPL 0, entao um processo de anel 3 nao consegue disparar excecoes/IRQs por
+conta propria, so causar as suas de verdade): `SYS_WRITE` (so dentro da unica pagina que aquele processo tem
+acesso), `SYS_EXIT` e `SYS_YIELD`.
+
+Falhas de protecao (#PF -- falha de pagina, vetor 14; #GP -- protecao geral, vetor 13) sao interceptadas
+antes do caminho generico de kernel panic: se o processo que falhou nao for essencial, ele e marcado
+`ZOMBIE` e o escalonador segue para o proximo -- **so aquele processo morre, o sistema continua**. So cai em
+kernel panic se nao houver processo atual ou se o processo essencial (`init`) falhar.
+
+`spawn ring3` (fala com o kernel via `SYS_WRITE` e termina), `spawn ring3fault` (desreferencia NULL de
+proposito, dispara #PF) e `spawn ring3gpf` (executa `cli`, instrucao privilegiada, dispara #GP) sao
+processos de demonstracao escritos a mao em Assembly (posicao-independente, ja que cada um carrega num
+endereco fisico diferente) -- disponiveis nas duas shells (`help spawn`). O comando `memory` ganhou uma
+secao "Paginacao" mostrando se esta ligada. Ver [Limitacoes atuais](#limitacoes-atuais) para o que ainda nao
+existe (CR3 por processo, um carregador de executaveis de usuario de verdade).
 
 ### Disco e persistencia (`kernel/drivers/ata.c`, `kernel/fs_persist.c`)
 
@@ -297,7 +336,7 @@ grafica com a shell C de emergencia dentro da janela do terminal, por exemplo.
 | `su <uid>` | troca de usuario (0 = root, 1000 = user; sem senha nesta versao) |
 | `save` / `load` | grava o ramfs no disco / substitui pela imagem do disco (so root) |
 | `ps` / `processes` | PID, PPID, nome, estado, memoria e tempo de vida |
-| `spawn <hello\|worker\|hog\|spin\|prog.rb> [seg]` | cria uma tarefa em segundo plano (demo em C ou programa Ruby) |
+| `spawn <hello\|worker\|hog\|spin\|ring3\|ring3fault\|ring3gpf\|prog.rb> [seg]` | cria uma tarefa em segundo plano (demo em C, demo de anel 3, ou programa Ruby) |
 | `run <prog.rb> [args]` | executa um programa Ruby em primeiro plano (Ctrl+C interrompe) |
 | `kill <pid>` | encerra um processo e libera a memoria dele |
 | `rb <expressao>` | avalia Ruby na propria shell (ex.: `rb 6 * 7`) |
@@ -424,7 +463,7 @@ ruby tests/run_tests.rb        # ou: make test       (contra a RubyShell)
 make test-c                    # a mesma suite contra a shell C de emergencia
 ```
 
-A suite faz **104 verificacoes** no QEMU contra a RubyShell (menos contra a shell C: alguns testes so fazem
+A suite faz **111 verificacoes** no QEMU contra a RubyShell (menos contra a shell C: alguns testes so fazem
 sentido na Ruby):
 
 1. **testes unitarios em C no PC hospedeiro**, com AddressSanitizer e UBSan: `util`, `heap` (com
@@ -451,7 +490,11 @@ sentido na Ruby):
     disco, e `load` tambem funciona sob demanda sem reiniciar;
 13. **interface grafica**: `gfx=1` liga o modo VBE (mensagem de sucesso com a resolucao), cai de volta para
     o modo texto sem travar quando nao ha placa compativel (`-vga none`), e a shell pela serial continua
-    respondendo identica com a area de trabalho ativa (nenhuma regressao).
+    respondendo identica com a area de trabalho ativa (nenhuma regressao);
+14. **paginacao e anel 3 (0.6)**: `memory` mostra a paginacao ligada, `spawn ring3` roda em anel 3 de
+    verdade e fala com o kernel via `int 0x80`, `spawn ring3fault`/`ring3gpf` disparam #PF/#GP de proposito
+    e **o sistema se recupera** (so o processo que falhou morre, sem zumbis no `ps` depois), nas duas
+    shells (Ruby e `shell=c`).
 
 `RUBYOS_TEST_ONLY=regex ruby tests/run_tests.rb` roda so os testes cujo nome casa (para depurar). O QEMU roda
 com `-display none`; nada no computador fisico e alterado. **Nota sobre o teste da interface grafica:** com
@@ -476,10 +519,13 @@ RubyOS/
 │   ├── kernel.c/.h        kmain, linha de comando do Multiboot, panic
 │   ├── memory/pmm/heap    mapa de memoria -> PMM -> heap (kmalloc/krealloc/kfree, donos, cotas)
 │   ├── ramfs.c/.h         sistema de arquivos em RAM
-│   ├── process.c/.h       processos, escalonador cooperativo
+│   ├── process.c/.h       processos, escalonador cooperativo/preemptivo, processos de anel 3
+│   ├── paging.c/.h        paginacao (0.6): identidade de 4 GiB com PSE, remendo de janela p/ anel 3
+│   ├── syscall.c/.h       despacho de "int 0x80" (0.6): SYS_WRITE, SYS_EXIT, SYS_YIELD
+│   ├── ring3_demo.c/.h    processos de demonstracao em anel 3 (0.6), Assembly posicao-independente
 │   ├── console.c/.h       fila de entrada (teclado + serial) e Ctrl+C
 │   ├── terminal.c/.h      VGA 80x25 + serial + kprintf + captura de saida
-│   ├── interrupts.c/.h    GDT, IDT, PIC
+│   ├── interrupts.c/.h    GDT (com segmentos de anel 3 e TSS, 0.6), IDT, PIC
 │   ├── sysinfo.c/.h       CPUID, reboot, shutdown
 │   ├── shell*.c           shell C de emergencia
 │   ├── ruby/              rb_runtime.c (processos Ruby), rb_bindings.c (RubyOS::*), rb_embedded.h
@@ -523,10 +569,17 @@ RubyOS/
 
 ## Limitacoes atuais
 
-- **Sem seguranca real.** Tudo (kernel, shell, programas Ruby) roda no anel 0 e no mesmo espaco de enderecos.
-  Um programa Ruby so alcanca o kernel pela API `RubyOS::*`, mas **nao ha isolamento imposto pelo hardware**:
-  um bug no interpretador (C) pode derrubar o sistema. Existem: cota de heap por processo, canario de pilha,
+- **Isolamento real existe desde a 0.6, mas so para os processos de demonstracao de anel 3** (`spawn ring3`,
+  `ring3fault`, `ring3gpf` -- ver [Paginacao e modo usuario](#paginacao-e-modo-usuario-anel-3)). O kernel, a
+  shell e **todos os programas Ruby continuam rodando no anel 0 e no mesmo espaco de enderecos**: um
+  programa Ruby so alcanca o kernel pela API `RubyOS::*`, mas nada no hardware o impede de ir alem -- um bug
+  no interpretador (C) ainda pode derrubar o sistema. Existem: cota de heap por processo, canario de pilha,
   protecao de pilha no gancho da VM, deteccao de double free no heap, `kernel_panic` em excecoes da CPU.
+- **Um unico Page Directory, compartilhado por todos os processos (sem CR3 por processo).** Se dois
+  processos de anel 3 rodassem ao mesmo tempo, cada um enxergaria a pagina de usuario do outro -- nao ha
+  espacos de enderecos separados ainda, so a mesma identidade de 4 GiB remendada em pontos especificos. Nao
+  ha tambem um carregador de executaveis de usuario de verdade (ELF ou outro formato): so os tres programas
+  de demonstracao embutidos (`kernel/ring3_demo.c`), escritos a mao em Assembly.
 - **Escalonador preemptivo desde a 0.4, mas so entre tarefas.** O timer troca de tarefa sozinho (uma tarefa
   sem ponto de cessao nao trava mais o sistema), mas nao ha preempcao *dentro* de uma unica chamada nativa
   longa no kernel (uma rotina em C que nunca retorna ainda trava tudo). Ctrl+C mata sem rodar `ensure`.
@@ -557,7 +610,8 @@ RubyOS/
   tem para onde entregar eventos sinteticos — por isso os testes automatizados cobrem boot/fallback/regressao
   da shell com `gfx=1`, mas nao clique ou arrasto de janela real; isso so foi visto funcionando manualmente
   com tela de verdade.
-- **32 bits** (i686), RAM acima de 4 GiB nao e usada. Sem paginacao.
+- **32 bits** (i686), RAM acima de 4 GiB nao e usada. A paginacao (0.6) e so identidade (mesmo endereco
+  fisico e virtual); nao ha memoria virtual de verdade nem espacos de enderecos distintos por processo.
 - Teclado: layout US. Pela serial, setas inserem lixo na linha.
 - `shutdown` so desliga em VMs; `date`/`time` mostram o que o RTC informar (assume seculo 20xx).
 - Nao foi testado em hardware real nem no Windows nativo. O primeiro build demora (compila o mruby).
@@ -570,8 +624,8 @@ RubyOS/
 | 0.2 | Memoria, filesystem, comandos de arquivos, processos basicos | feita e testada |
 | 0.3 | Runtime Ruby (mruby), scripts, apps Ruby (calc, files, edit, irb), RubyShell em Ruby | feita e testada |
 | **0.4** | **Scheduler preemptivo (timer), driver de disco (ATA PIO) com persistencia (save/load), permissoes (donos/modo, su, chmod/chown)** | **feita e testada** |
-| **0.5** | **Interface grafica (RubyShell Desktop), janelas** | **feita e testada** |
-| 0.6 | Paginacao de memoria, isolamento kernel/processo em anel 3, excecoes de protecao (page fault, GPF tratados sem derrubar o sistema) | planejada |
+| 0.5 | Interface grafica (RubyShell Desktop), janelas | feita e testada |
+| **0.6 ("Anel")** | **Paginacao de memoria, isolamento kernel/processo em anel 3, excecoes de protecao (page fault, GPF tratados sem derrubar o sistema)** | **feita e testada** |
 | 0.7 | Kit de widgets graficos (botao, campo de texto, lista, menu) para o gerenciador de janelas, mais apps Ruby de exemplo com interface grafica | planejada |
 | 0.8 | Disco mais amplo (segundo disco/escravo, deteccao melhor do controlador, bitmap de blocos real) | planejada |
 | 0.9 | Video real via VESA BIOS (alem do Bochs dispi ja existente); melhorias de shell (pipes, historico, Tab, variaveis) | planejada |

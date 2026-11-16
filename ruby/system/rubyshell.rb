@@ -437,10 +437,10 @@ module Shell
     COMMANDS["ps"][:fn].call(a)
   end
 
-  command("Processos:", "spawn", "spawn <hello|worker|hog|spin|prog.rb> [seg]",
-          "cria uma tarefa (demo ou programa Ruby)") do |a|
+  command("Processos:", "spawn", "spawn <hello|worker|hog|spin|ring3*|prog.rb> [seg]",
+          "cria uma tarefa (demo, anel 3 ou programa Ruby)") do |a|
     if a.empty? || a.size > 2
-      out("Uso: spawn <hello|worker|hog|spin|programa.rb> [segundos]\n")
+      out("Uso: spawn <hello|worker|hog|spin|ring3|ring3fault|ring3gpf|programa.rb> [segundos]\n")
       next 1
     end
     name = a[0]
@@ -457,7 +457,7 @@ module Shell
       unless pid
         path = RubyOS::Proc.find(name)
         unless path
-          out("spawn: programa desconhecido: #{name} (use hello, worker, hog, spin ou um programa Ruby)\n")
+          out("spawn: programa desconhecido: #{name} (use hello, worker, hog, spin, ring3, ring3fault, ring3gpf ou um programa Ruby)\n")
           next 1
         end
         pid = RubyOS::Proc.spawn(path, a[1, a.size - 1])
@@ -554,6 +554,12 @@ module Shell
     out("RamFS (somente RAM)\n")
     out("  Nos: #{m[:fs_nodes]} de #{m[:fs_max_nodes]} (#{m[:fs_dirs]} diretorios, #{m[:fs_files]} arquivos)\n")
     out("  Dados: #{m[:fs_bytes]} de #{m[:fs_max_bytes]} bytes\n")
+    out("Paginacao\n")
+    if m[:paging_enabled]
+      out("  ligada: identidade de 4 GiB (PSE), anel 3 disponivel ('spawn ring3')\n")
+    else
+      out("  desligada: CPU sem suporte a PSE (anel 3 indisponivel nesta maquina)\n")
+    end
     0
   end
 

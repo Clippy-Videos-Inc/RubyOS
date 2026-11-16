@@ -22,6 +22,7 @@
 #include "../kernel.h"
 #include "../kstring.h"
 #include "../memory.h"
+#include "../paging.h"
 #include "../process.h"
 #include "../ramfs.h"
 #include "../sysinfo.h"
@@ -69,6 +70,11 @@ static mrb_value sym_value(mrb_state *mrb, const char *name)
 static void hash_int(mrb_state *mrb, mrb_value h, const char *key, uint32_t v)
 {
     mrb_hash_set(mrb, h, sym_value(mrb, key), mrb_int_value(mrb, (mrb_int)v));
+}
+
+static void hash_bool(mrb_state *mrb, mrb_value h, const char *key, bool v)
+{
+    mrb_hash_set(mrb, h, sym_value(mrb, key), mrb_bool_value(v));
 }
 
 /* Algum processo tem node (ou algo dentro dele) como diretorio atual? */
@@ -801,6 +807,7 @@ static mrb_value sys_memory(mrb_state *mrb, mrb_value self)
     hash_int(mrb, h, "fs_bytes", (uint32_t)fs.bytes);
     hash_int(mrb, h, "fs_max_nodes", FS_MAX_NODES);
     hash_int(mrb, h, "fs_max_bytes", FS_MAX_TOTAL_BYTES);
+    hash_bool(mrb, h, "paging_enabled", pg_enabled());
     return h;
 }
 

@@ -9,6 +9,7 @@
 #include "memory.h"
 #include "ramfs.h"
 #include "process.h"
+#include "paging.h"
 #include "sysinfo.h"
 #include "drivers/rtc.h"
 #include "drivers/timer.h"
@@ -87,6 +88,11 @@ static int cmd_memory(int argc, char **argv)
     kprintf("RamFS (somente RAM)\n");
     kprintf("  Nos: %u de %u (%u diretorios, %u arquivos)\n", fs.nodes, FS_MAX_NODES, fs.dirs, fs.files);
     kprintf("  Dados: %u de %u bytes\n", (uint32_t)fs.bytes, FS_MAX_TOTAL_BYTES);
+    kprintf("Paginacao\n");
+    if (pg_enabled())
+        kprintf("  ligada: identidade de 4 GiB (PSE), anel 3 disponivel ('spawn ring3')\n");
+    else
+        kprintf("  desligada: CPU sem suporte a PSE (anel 3 indisponivel nesta maquina)\n");
     return 0;
 }
 

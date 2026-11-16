@@ -4,11 +4,16 @@
 #include "io.h"
 #include "kernel.h"
 #include "kstring.h"
+#include "terminal.h"
+#include "interrupts.h"
+#include "pmm.h"
+#include "paging.h"
 #include "drivers/timer.h"
 
 #define STACK_CANARY 0x5AFEC0DEu
 
 extern void context_switch(uint32_t *old_esp, uint32_t new_esp);
+extern void enter_usermode(uint32_t eip, uint32_t user_esp) __attribute__((noreturn));
 extern char stack_bottom[];       /* pilha de boot (boot/boot.asm), usada pelo init */
 extern char stack_top[];
 
@@ -43,6 +48,13 @@ static void reap_zombies(void)
     for (i = 0; i < PROC_MAX; i++) {
         struct process *p = &table[i];
         if (p->state == PROC_ZOMBIE && p != current) {
+            if (p->user_mode && p->user_page_addr != 0) {
+                /* devolve a pagina de usuario ao kernel (supervisor) antes de liberar o
+                 * quadro fisico: se outro processo o reusar depois para algo que NAO seja
+                 * de anel 3, ele nao deve continuar acessivel do anel 3 por acidente. */
+                pg_revoke_user_access(p->user_page_addr);
+                pmm_free_region(p->user_page_addr, 1u);
+            }
             heap_free_owner(owner_of(p));          /* pilha e tudo mais que o processo alocou */
             heap_set_owner_limit(owner_of(p), 0);
             memset(p, 0, sizeof(*p));              /* volta a PROC_UNUSED */
@@ -87,6 +99,14 @@ static void schedule(void)
 
     next->state = PROC_RUNNING;
     next->slice = PROC_TIMESLICE_TICKS;    /* fatia nova sempre que uma tarefa (re)assume a CPU */
+
+    /* TSS.esp0: pilha de kernel que a CPU vai usar se uma interrupcao pegar "next" rodando
+     * em anel 3. Atualizado sempre (mesmo para tarefas de anel 0, que nunca a consultam de
+     * verdade): e so uma palavra de 32 bits, mais barato que checar user_mode aqui. */
+    tss_set_kernel_stack(next->stack != NULL
+                              ? (uint32_t)(uintptr_t)(next->stack + next->stack_size)
+                              : (uint32_t)(uintptr_t)stack_top);
+
     if (next == prev)
         return;
 
@@ -98,12 +118,21 @@ static void schedule(void)
     reap_zombies();
 }
 
-/* Primeira funcao executada por uma tarefa nova (o "ret" do context_switch cai aqui). */
+/* Primeira funcao executada por uma tarefa nova (o "ret" do context_switch cai aqui).
+ * Para uma tarefa de anel 3 (0.6), em vez de chamar entry(arg) (ela nao tem: o "programa"
+ * e so os bytes copiados para a pagina de usuario), salta para o modo usuario de verdade
+ * via enter_usermode() -- que nunca retorna por si so; so "volta" para ca se o processo
+ * terminar (SYS_EXIT) ou sofrer uma excecao de protecao, e nos dois casos quem retoma a
+ * CPU e outra tarefa (ver process_exit() e process_handle_protection_fault()), nunca este
+ * ponto do codigo. */
 static void task_start(void)
 {
     cpu_sti();
     reap_zombies();
-    current->entry(current->arg);
+    if (current->user_mode)
+        enter_usermode(current->user_entry, current->user_stack_top);
+    else
+        current->entry(current->arg);
     process_exit();
 }
 
@@ -199,6 +228,88 @@ int process_create_ex(const char *name, void (*entry)(void *), void *arg, uint32
     p->esp = (uint32_t)(uintptr_t)sp;
 
     p->state = PROC_READY;                         /* por ultimo: so agora o escalonador a ve */
+    cpu_restore_flags(saved);
+    return pid;
+}
+
+int process_create_user(const char *name, const uint8_t *code, size_t code_len, uint32_t flags)
+{
+    uint32_t saved = cpu_save_flags_cli();
+    struct process *p = NULL;
+    uint8_t *kstack;
+    uint32_t *sp;
+    uintptr_t top;
+    uint32_t user_phys;
+    size_t i;
+    int pid;
+
+    if (!pg_enabled()) {
+        cpu_restore_flags(saved);
+        return PROC_ENOMEM;     /* CPU sem PSE: anel 3 indisponivel nesta maquina (ver paging.h) */
+    }
+    if (code_len == 0 || code_len > PMM_FRAME_SIZE - 64u) {
+        cpu_restore_flags(saved);
+        return PROC_ENOMEM;     /* nao cabe (com folga para a pilha) na unica pagina do usuario */
+    }
+
+    for (i = 0; i < PROC_MAX; i++) {
+        if (table[i].state == PROC_UNUSED) {
+            p = &table[i];
+            break;
+        }
+    }
+    if (p == NULL) {
+        cpu_restore_flags(saved);
+        return PROC_ENOSLOT;
+    }
+
+    kstack = kmalloc_owner(PROC_STACK_SIZE, owner_of(p));
+    if (kstack == NULL) {
+        cpu_restore_flags(saved);
+        return PROC_ENOMEM;
+    }
+    *(uint32_t *)(void *)kstack = STACK_CANARY;
+
+    user_phys = pmm_alloc_contiguous(1u);
+    if (user_phys == 0 || !pg_make_user_accessible(user_phys)) {
+        if (user_phys != 0)
+            pmm_free_region(user_phys, 1u);
+        heap_free_owner(owner_of(p));
+        cpu_restore_flags(saved);
+        return PROC_ENOMEM;
+    }
+    memset((void *)(uintptr_t)user_phys, 0, PMM_FRAME_SIZE);
+    memcpy((void *)(uintptr_t)user_phys, code, code_len);
+
+    memset(p, 0, sizeof(*p));
+    pid = next_pid++;
+    p->pid = pid;
+    p->ppid = current->pid;
+    for (i = 0; i < PROC_NAME_MAX && name[i] != '\0'; i++)
+        p->name[i] = name[i];
+    p->name[i] = '\0';
+    p->essential = (flags & PROC_FLAG_ESSENTIAL) != 0;
+    p->uid = current->uid;
+    p->stack = kstack;                             /* pilha de KERNEL (usada ao entrar por syscall/excecao) */
+    p->stack_size = PROC_STACK_SIZE;
+    p->start_tick = timer_ticks();
+    p->slice = PROC_TIMESLICE_TICKS;
+    p->cwd = current->cwd;
+    p->user_mode = true;
+    p->user_page_addr = user_phys;
+    p->user_page_size = PMM_FRAME_SIZE;
+    p->user_entry = user_phys;                                       /* codigo comeca no inicio da pagina */
+    p->user_stack_top = (user_phys + PMM_FRAME_SIZE) & ~(uint32_t)15u; /* topo da pagina, alinhado */
+    heap_set_owner_limit(owner_of(p), PROC_HEAP_LIMIT);
+
+    top = ((uintptr_t)kstack + PROC_STACK_SIZE) & ~(uintptr_t)15u;
+    sp = (uint32_t *)(void *)(top - 6u * sizeof(uint32_t));
+    sp[0] = 0; sp[1] = 0; sp[2] = 0; sp[3] = 0;     /* edi esi ebx ebp */
+    sp[4] = (uint32_t)(uintptr_t)task_start;        /* ret */
+    sp[5] = 0;                                      /* retorno falso de task_start */
+    p->esp = (uint32_t)(uintptr_t)sp;
+
+    p->state = PROC_READY;
     cpu_restore_flags(saved);
     return pid;
 }
@@ -335,4 +446,28 @@ const char *process_state_name(enum proc_state s)
     case PROC_ZOMBIE:   return "ZOMBIE";
     default:            return "UNUSED";
     }
+}
+
+bool process_handle_protection_fault(uint32_t int_no, uint32_t cr2, uint32_t err_code,
+                                      uint32_t eip, uint32_t cs)
+{
+    const char *kind = (int_no == 14u) ? "FALHA DE PAGINA" : "PROTECAO GERAL (GPF)";
+    bool from_user = (cs & 3u) == 3u;
+
+    if (current == NULL || current->essential)
+        return false;                      /* kernel panic de sempre: bug do proprio kernel */
+
+    terminal_setcolor(VGA_YELLOW, VGA_BLACK);
+    kprintf("\n*** %s: processo %d (%s) encerrado -- modo %s ***\n",
+            kind, current->pid, current->name, from_user ? "usuario" : "kernel");
+    if (int_no == 14u)
+        kprintf("    endereco: 0x%x  EIP: 0x%x  erro: 0x%x\n", cr2, eip, err_code);
+    else
+        kprintf("    EIP: 0x%x  erro: 0x%x\n", eip, err_code);
+    terminal_setcolor(VGA_LIGHT_GREY, VGA_BLACK);
+    kprintf("    sistema continua: so esse processo foi encerrado.\n");
+
+    current->state = PROC_ZOMBIE;
+    schedule();                            /* nunca retorna: o zumbi nunca volta a ser escolhido */
+    return true;                           /* inalcancavel */
 }

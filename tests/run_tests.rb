@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# tests/run_tests.rb - testes automatizados do RubyOS 0.5.
+# tests/run_tests.rb - testes automatizados do RubyOS 0.6.
 #
 # Uso:  ruby tests/run_tests.rb                     (shell padrao: RubyShell, em Ruby)
 #       RUBYOS_TEST_SHELL=c ruby tests/run_tests.rb  (a mesma suite contra a shell C de emergencia)
@@ -251,11 +251,13 @@ puts '== 3. Boot e comandos de sistema (QEMU -kernel) =='
 with_kernel do |vm|
   check('boot: banner, etapas de init e prompt') do
     out = vm.output
-    out.include?('RubyOS 0.5') &&
+    out.include?('RubyOS 0.6') &&
       out.include?('Ruby Powered Operating System') &&
       out.include?('Initializing kernel...') &&
       out.include?('Initializing memory...') &&
       out.match?(/RAM utilizavel: \d+ KB, heap do kernel: \d+ KB/) &&
+      out.include?('Initializing paging...') &&
+      out.match?(/identidade 4 GiB \(PSE\), anel 3 disponivel/) &&
       out.include?('Initializing filesystem...') &&
       out.match?(/ramfs: 9 diretorios, 3 arquivos/) &&
       out.include?('Initializing processes...') &&
@@ -287,7 +289,7 @@ with_kernel do |vm|
 
   check('about mostra versao, kernel, runtime, CPU, memoria e arquitetura') do
     out = vm.command('about')
-    out.match?(/^RubyOS 0\.5$/) && out.match?(/^Kernel: 0\.5$/) && out.match?(/^Ruby Runtime: /) &&
+    out.match?(/^RubyOS 0\.6$/) && out.match?(/^Kernel: 0\.6$/) && out.match?(/^Ruby Runtime: /) &&
       out.match?(/^CPU: .+/) && out.match?(/^Memory: ~\d+ MB/) && out.match?(/^Architecture: i686/)
   end
 
@@ -437,7 +439,7 @@ with_kernel do |vm|
     p = vm.command('cat /tmp/ps.txt')
     d = vm.command('cat /tmp/dois.txt')
     l.include?('home/') && l.include?('leia-me.txt') && p.match?(/^2\s+1\s+shell\s+RUNNING/) &&
-      d.include?('Bem-vindo ao RubyOS 0.5') && d.match?(/^rubyos$/) &&
+      d.include?('Bem-vindo ao RubyOS 0.6') && d.match?(/^rubyos$/) &&
       vm.command('echo a >').include?('sintaxe invalida') &&
       vm.command('> arq').include?('sintaxe invalida') &&
       vm.command('echo a > b > c').include?('sintaxe invalida')
@@ -677,7 +679,7 @@ with_kernel do |vm|
   end
 
   check('programa Ruby executa pelo nome (hello.rb, about) como comando') do
-    vm.command('hello.rb').include?('Ola, mundo!') && vm.command('about').match?(/^RubyOS 0\.5$/) &&
+    vm.command('hello.rb').include?('Ola, mundo!') && vm.command('about').match?(/^RubyOS 0\.6$/) &&
       vm.command('fib.rb 10').include?('0 1 1 2 3 5 8 13 21 34')
   end
 
@@ -1015,7 +1017,7 @@ with_qemu(['-kernel', RubyOSTools::KERNEL_ELF, '-append', 'gfx=1']) do |vm|
   end
 
   check('gfx=1: a shell pela serial continua identica, com a area de trabalho ativa') do
-    vm.command('about').match?(/^RubyOS 0\.5$/) &&
+    vm.command('about').match?(/^RubyOS 0\.6$/) &&
       vm.command('ls /').include?('home/')
   end
 end
@@ -1025,7 +1027,60 @@ with_qemu(['-kernel', RubyOSTools::KERNEL_ELF, '-append', 'gfx=1', '-vga', 'none
     next false unless vm.wait_for(/RubyOS> \z/, timeout: 30)
 
     vm.output.include?('modo grafico indisponivel') &&
-      vm.command('about').match?(/^RubyOS 0\.5$/)
+      vm.command('about').match?(/^RubyOS 0\.6$/)
+  end
+end
+
+puts '== 14. Paginacao e modo usuario, anel 3 (0.6) =='
+with_kernel do |vm|
+  check('memory mostra a secao Paginacao ligada (PSE)') do
+    out = vm.command('memory')
+    out.include?('Paginacao') &&
+      out.match?(/ligada: identidade de 4 GiB \(PSE\), anel 3 disponivel/)
+  end
+
+  check('spawn ring3: roda de verdade em anel 3 e fala com o kernel via syscall') do
+    out = vm.command('spawn ring3')
+    out.include?('processo criado:') &&
+      out.include?('Ola do anel 3! syscall SYS_WRITE funcionando, isolado do kernel.')
+  end
+
+  check('spawn ring3: termina sozinho e some do ps (heap recuperado)') do
+    ps_rows(vm.command('ps')).none? { |r| r[:name] == 'ring3' }
+  end
+
+  check('spawn ring3fault: falha de pagina (NULL) e tratada, so o processo morre') do
+    out = vm.command('spawn ring3fault')
+    out.include?('ring3fault: vou escrever no endereco 0 (NULL) de proposito') &&
+      out.include?('*** FALHA DE PAGINA:') &&
+      out.match?(/processo \d+ \(ring3fault\) encerrado -- modo usuario/) &&
+      out.include?('endereco: 0x0') &&
+      out.include?('sistema continua: so esse processo foi encerrado.') &&
+      vm.command('echo ainda-vivo').match?(/^ainda-vivo$/)
+  end
+
+  check('spawn ring3gpf: protecao geral (CLI em anel 3) e tratada, so o processo morre') do
+    out = vm.command('spawn ring3gpf')
+    out.include?('ring3gpf: vou executar CLI (instrucao privilegiada) de proposito') &&
+      out.include?('*** PROTECAO GERAL (GPF):') &&
+      out.match?(/processo \d+ \(ring3gpf\) encerrado -- modo usuario/) &&
+      out.include?('sistema continua: so esse processo foi encerrado.') &&
+      vm.command('echo ainda-vivo').match?(/^ainda-vivo$/)
+  end
+
+  check('depois dos crashes de anel 3, ps so mostra init e shell (sem zumbis)') do
+    rows = ps_rows(vm.command('ps'))
+    rows.length == 2 && rows.all? { |r| %w[init shell].include?(r[:name]) }
+  end
+
+  check('shell C de emergencia (shell=c) tambem oferece spawn ring3*') do
+    with_qemu(['-kernel', RubyOSTools::KERNEL_ELF, '-append', 'shell=c']) do |cvm|
+      next false unless cvm.wait_for(/RubyOS> \z/, timeout: 25)
+
+      ok = cvm.command('spawn ring3').include?('Ola do anel 3!')
+      ok &&= cvm.command('spawn ring3gpf').include?('*** PROTECAO GERAL (GPF):')
+      ok && cvm.command('echo viva').match?(/^viva$/)
+    end
   end
 end
 

@@ -10,7 +10,9 @@ extern isr_handler
 
 global gdt_flush
 global idt_flush
+global tss_flush
 global isr_stub_table
+global isr_syscall
 
 section .text
 
@@ -32,6 +34,13 @@ gdt_flush:
 idt_flush:
     mov eax, [esp + 4]
     lidt [eax]
+    ret
+
+; void tss_flush(void) - carrega o seletor da (unica) TSS do sistema (0.6: anel 3).
+; 0x28 = indice 5 da GDT (ver interrupts.c: GDT_SEL_TSS).
+tss_flush:
+    mov ax, 0x28
+    ltr ax
     ret
 
 ; Excecao sem codigo de erro: empilha um 0 para manter a mesma estrutura.
@@ -58,6 +67,15 @@ isr%1:
     %endif
     %assign n n+1
 %endrep
+
+; Vetor 0x80 (128): a chamada de sistema do anel 3 ("int 0x80", ver syscall.h). Fora da
+; tabela isr_stub_table (que so cobre 0..47) porque interrupts.c instala este vetor
+; manualmente, com DPL 3 (os outros 47 continuam DPL 0: so o kernel pode dispara-los).
+; Sem codigo de erro de verdade (empilha 0), igual a qualquer ISR_NOERR.
+isr_syscall:
+    push dword 0
+    push dword 0x80
+    jmp isr_common
 
 isr_common:
     pusha                               ; eax ecx edx ebx esp ebp esi edi

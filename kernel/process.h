@@ -1,4 +1,4 @@
-/* kernel/process.h - processos (tarefas do kernel) da RubyOS 0.4.
+/* kernel/process.h - processos (tarefas do kernel) da RubyOS 0.6.
  *
  * O que existe de verdade nesta versao:
  *   - tabela de processos com PID, nome, pai, estado, dono (uid) e diretorio atual;
@@ -7,14 +7,22 @@
  *   - contabilidade de memoria por processo e cota de 1 MiB de heap por tarefa;
  *   - ao terminar, tudo o que o processo alocou (inclusive a pilha) e liberado;
  *   - escalonamento PREEMPTIVO por fatia de tempo (round-robin; o timer forca a troca
- *     quando uma tarefa nao cede a CPU sozinha), alem do yield/sleep cooperativos de sempre.
+ *     quando uma tarefa nao cede a CPU sozinha), alem do yield/sleep cooperativos de sempre;
+ *   - a partir da 0.6: process_create_user() cria tarefas que rodam de verdade em
+ *     ANEL 3 (ver paging.h e syscall.h), isoladas do kernel pelo hardware de paginacao;
+ *     e process_handle_protection_fault() deixa uma FALHA DE PAGINA ou uma PROTECAO
+ *     GERAL matarem so o processo causador (de anel 0 ou 3) em vez de derrubar o
+ *     sistema inteiro, contanto que o processo nao seja essencial.
  *
- * O que NAO existe ainda (planejado para a 0.5 em diante):
- *   - isolamento: as tarefas rodam no anel 0, no mesmo espaco de enderecos do kernel;
- *   - modo usuario e chamadas de sistema (o uid existe para as permissoes do sistema de
- *     arquivos, mas nao ha protecao de memoria entre processos de uids diferentes).
+ * O que NAO existe ainda (planejado para depois da 0.6):
+ *   - espacos de enderecamento separados por processo (um CR3 por processo): ha um so
+ *     diretorio de paginas global, entao dois processos de anel 3 ao mesmo tempo
+ *     enxergam a pagina de usuario um do outro (ver a limitacao documentada em paging.h);
+ *   - um carregador de executaveis de verdade (ELF, etc.): os processos de anel 3 desta
+ *     versao sao so os programas de demonstracao embutidos no kernel (ring3_demo.h).
  *
- * Os processos sao "threads do kernel". Programas de usuario (Ruby) chegam na 0.3+. */
+ * Os processos sao "threads do kernel" (anel 0) OU as tarefas de anel 3 acima. Um
+ * runtime Ruby completo rodando em anel 3 fica para uma versao futura. */
 #ifndef RUBYOS_PROCESS_H
 #define RUBYOS_PROCESS_H
 
@@ -71,6 +79,11 @@ struct process {
     uint32_t start_tick;
     uint32_t slice;                    /* ticks restantes da fatia de tempo atual */
     struct fs_node *cwd;
+    bool user_mode;                    /* true: tarefa de anel 3 (0.6) */
+    uint32_t user_entry;               /* EIP inicial em modo usuario (== user_page_addr) */
+    uint32_t user_stack_top;           /* ESP inicial em modo usuario */
+    uint32_t user_page_addr;           /* pagina fisica (== virtual) de codigo+pilha do usuario */
+    uint32_t user_page_size;           /* tamanho dela, usado pelos syscalls para validar ponteiros */
 };
 
 /* Adota o contexto de boot como processo 1 ("init"). Deve ser chamado uma vez, depois
@@ -86,6 +99,17 @@ int process_create(const char *name, void (*entry)(void *), void *arg, uint32_t 
  * Ruby precisa de pilha e cota maiores que as tarefas simples em C. */
 int process_create_ex(const char *name, void (*entry)(void *), void *arg, uint32_t flags,
                       size_t stack_size, size_t heap_limit);
+
+/* Cria uma tarefa de ANEL 3 (0.6): copia "code_len" bytes de "code" (binario plano,
+ * posicao-independente -- ver ring3_demo.h) para uma pagina fisica dedicada, marca essa
+ * pagina acessivel em modo usuario (paging.h: pg_make_user_accessible()) e a tarefa
+ * comeca a executar no offset 0 dela, em anel 3, com uma pilha de usuario no topo da
+ * mesma pagina. So pode chamar chamadas de sistema (syscall.h); qualquer outro acesso a
+ * memoria fora dessa pagina gera uma excecao de protecao tratada por
+ * process_handle_protection_fault() (mata so essa tarefa). Retorna o PID (> 0) ou um
+ * erro PROC_E* -- em especial, PROC_ENOMEM se a CPU nao tiver suporte a paginacao (PSE)
+ * e o anel 3 estiver indisponivel nesta maquina. */
+int process_create_user(const char *name, const uint8_t *code, size_t code_len, uint32_t flags);
 
 /* Encerra o processo atual. Nunca retorna. */
 void process_exit(void) __attribute__((noreturn));
@@ -126,5 +150,14 @@ const struct process *process_at(int index);
 size_t process_mem_bytes(const struct process *p);
 
 const char *process_state_name(enum proc_state s);
+
+/* Chamada pelo tratador de excecoes (kernel/interrupts.c) quando int_no e 13 (protecao
+ * geral) ou 14 (falha de pagina). cr2 so e significativo para a 14 (endereco que faltou).
+ * Se o processo atual nao for essencial, imprime o motivo, marca-o ZUMBI e troca de
+ * contexto -- NUNCA RETORNA nesse caso, igual a process_exit(). Se nao houver processo
+ * atual ou ele for essencial (o "init"), devolve false para o chamador decidir (hoje,
+ * um kernel panic: nesse caso o bug e do proprio kernel, nao ha o que recuperar). */
+bool process_handle_protection_fault(uint32_t int_no, uint32_t cr2, uint32_t err_code,
+                                      uint32_t eip, uint32_t cs);
 
 #endif

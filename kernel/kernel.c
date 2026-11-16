@@ -4,6 +4,7 @@
 #include "interrupts.h"
 #include "memory.h"
 #include "heap.h"
+#include "paging.h"
 #include "ramfs.h"
 #include "process.h"
 #include "shell.h"
@@ -124,6 +125,13 @@ void kmain(uint32_t magic, uint32_t mbi_addr)
     mm_init(g_boot_info);
     mm_get_info(&mi);
     kprintf("  RAM utilizavel: %u KB, heap do kernel: %u KB\n", mi.ram_kb, mi.heap_size / 1024u);
+
+    kprintf("Initializing paging...\n");
+    if (pg_init()) {
+        kprintf("  identidade 4 GiB (PSE), anel 3 disponivel (spawn ring3/ring3fault/ring3gpf)\n");
+    } else {
+        kprintf("  aviso: CPU sem suporte a PSE -- paginacao desligada, anel 3 indisponivel\n");
+    }
 
     kprintf("Initializing filesystem...\n");
     err = fs_init();

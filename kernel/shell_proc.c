@@ -7,6 +7,7 @@
 #include "util.h"
 #include "heap.h"
 #include "process.h"
+#include "ring3_demo.h"
 #include "ruby/rb_runtime.h"
 #include "drivers/timer.h"
 
@@ -110,10 +111,21 @@ static void task_spin(void *arg)
 }
 
 /* Cria uma tarefa de demonstracao. Retorna o PID, PROC_ENOSLOT/PROC_ENOMEM, ou
- * PROC_DEMO_UNKNOWN se o nome nao existir. Usado pelas shells C e Ruby. */
+ * PROC_DEMO_UNKNOWN se o nome nao existir. Usado pelas shells C e Ruby.
+ *
+ * "ring3", "ring3fault" e "ring3gpf" (0.6) sao as unicas que rodam de verdade em anel 3
+ * (process_create_user(), nao process_create()) -- "seconds" nao se aplica a elas, igual
+ * a "hello". Ver kernel/ring3_demo.c para o que cada uma faz e por que. */
 int proc_spawn_demo(const char *name, uint32_t seconds)
 {
     void (*entry)(void *);
+
+    if (k_streq(name, "ring3"))
+        return process_create_user(name, ring3_prog_hello, ring3_prog_hello_len, 0);
+    if (k_streq(name, "ring3fault"))
+        return process_create_user(name, ring3_prog_fault, ring3_prog_fault_len, 0);
+    if (k_streq(name, "ring3gpf"))
+        return process_create_user(name, ring3_prog_gpf, ring3_prog_gpf_len, 0);
 
     if (k_streq(name, "hello"))
         entry = task_hello;
@@ -134,7 +146,7 @@ static int cmd_spawn(int argc, char **argv)
     int pid;
 
     if (argc < 2 || argc > 3) {
-        kprintf("Uso: spawn <hello|worker|hog|spin|programa.rb> [segundos]\n");
+        kprintf("Uso: spawn <hello|worker|hog|spin|ring3|ring3fault|ring3gpf|programa.rb> [segundos]\n");
         return 1;
     }
     if (k_streq(argv[1], "worker") && argc == 3 &&
@@ -147,7 +159,8 @@ static int cmd_spawn(int argc, char **argv)
     if (pid == PROC_DEMO_UNKNOWN) {
         pid = ruby_spawn_program(argv[1], argc - 2, (const char *const *)&argv[2]);
         if (pid == RB_ENOTFOUND) {
-            kprintf("spawn: programa desconhecido: %s (use hello, worker, hog, spin ou um programa Ruby)\n", argv[1]);
+            kprintf("spawn: programa desconhecido: %s (use hello, worker, hog, spin, ring3, "
+                    "ring3fault, ring3gpf ou um programa Ruby)\n", argv[1]);
             return 1;
         }
     }
@@ -221,7 +234,7 @@ static int cmd_run(int argc, char **argv)
 static const struct command commands[] = {
     { "ps",        "ps",                              "lista os processos (PID, estado, memoria)",    cmd_ps },
     { "processes", "processes",                       "o mesmo que ps",                               cmd_ps },
-    { "spawn",     "spawn <hello|worker|hog|spin|prog.rb> [seg]",  "cria uma tarefa (demo ou programa Ruby)",              cmd_spawn },
+    { "spawn",     "spawn <hello|worker|hog|spin|ring3*|prog.rb> [seg]",  "cria uma tarefa (demo, anel 3 ou programa Ruby)",              cmd_spawn },
     { "run",       "run <programa.rb> [args]",        "executa um programa Ruby (Ctrl+C interrompe)", cmd_run },
     { "kill",      "kill <pid>",                      "encerra um processo e libera a memoria dele",  cmd_kill },
 };
